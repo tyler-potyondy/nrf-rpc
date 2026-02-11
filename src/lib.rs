@@ -1,3 +1,4 @@
+#![no_std]
 pub mod ble;
 #[doc(hidden)]
 pub mod packet;
@@ -63,7 +64,7 @@ impl<T: AsyncTransport> RpcClient<T> {
         self.send_packet(rpc_utils_init.as_slice()).await?;
 
         let mut response_buf = [0u8; 256];
-        
+
         let len = self.receive_packet(&mut response_buf).await?;
         if len >= 5 && response_buf[0] == 0x04 {
             self.bt_rpc_group_id = response_buf[4];
@@ -87,12 +88,18 @@ impl<T: AsyncTransport> RpcClient<T> {
     }
 
     pub(crate) async fn send_packet(&mut self, packet: &[u8]) -> Result<(), RpcError> {
-        self.transport.write(packet).await.map_err(|_| RpcError::Transport)?;
+        self.transport
+            .write(packet)
+            .await
+            .map_err(|_| RpcError::Transport)?;
         Ok(())
     }
 
     pub(crate) async fn receive_packet(&mut self, output: &mut [u8]) -> Result<usize, RpcError> {
-        self.transport.read(output).await.map_err(|_| RpcError::Transport)
+        self.transport
+            .read(output)
+            .await
+            .map_err(|_| RpcError::Transport)
     }
 
     pub(crate) async fn send_command(&mut self, packet: &[u8]) -> Result<i32, RpcError> {
@@ -116,7 +123,7 @@ impl<T: AsyncTransport> RpcClient<T> {
 
     fn decode_i32_response(&self, payload: &[u8]) -> Result<i32, RpcError> {
         use minicbor::decode::Decoder;
-        
+
         let mut decoder = Decoder::new(payload);
         decoder.i32().map_err(|_| RpcError::InvalidResponse)
     }

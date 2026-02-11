@@ -9,7 +9,7 @@
 use core::fmt;
 
 /// Error trait for transport implementations
-pub trait TransportError: fmt::Debug + fmt::Display {}
+pub trait TransportError: fmt::Debug {}
 
 /// Async transport for sending/receiving raw bytes over UART
 ///
@@ -42,12 +42,12 @@ pub trait TransportError: fmt::Debug + fmt::Display {}
 pub trait AsyncTransport {
     /// Error type for this transport
     type Error: TransportError;
-    
+
     /// Write bytes to the transport
     ///
     /// Should block until all bytes are written or an error occurs.
     async fn write(&mut self, data: &[u8]) -> Result<(), Self::Error>;
-    
+
     /// Read bytes from the transport into the provided buffer
     ///
     /// Returns the number of bytes read. May return fewer bytes than
