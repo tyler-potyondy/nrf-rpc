@@ -1,1 +1,4 @@
 /target
+/nrf
+DESIGN.md
+tests/raw_rpc
