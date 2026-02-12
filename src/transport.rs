@@ -46,7 +46,7 @@ pub trait AsyncTransport {
     /// Write bytes to the transport
     ///
     /// Should block until all bytes are written or an error occurs.
-    async fn write(&mut self, data: &[u8]) -> Result<(), Self::Error>;
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error>;
 
     /// Read bytes from the transport into the provided buffer
     ///
