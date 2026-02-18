@@ -1,0 +1,4 @@
+[submodule "tests/external/nrf"]
+	path = tests/external/nrf
+	url = https://github.com/PLSysSec/sdk-nrf/
+	branch = bsim-test
