@@ -20,7 +20,7 @@
 //! ble.bt_le_adv_start(&param, &ad, &sd).await?;
 //! ```
 
-use crate::packet::{CborError, PacketBuilder};
+use crate::cbor_encoding::{CborError, PacketBuilder};
 use crate::{AsyncTransport, RpcClient, RpcError};
 
 // ============================================================================
@@ -34,6 +34,12 @@ pub struct Ble<T: AsyncTransport> {
     client: RpcClient<T>,
 }
 
+#[derive(Debug)]
+pub enum BleError {
+    RpcError,
+    InvalidParameter,
+}
+
 impl<T: AsyncTransport> Ble<T> {
     /// Create a new BLE client and initialize the RPC connection
     ///
@@ -43,9 +49,9 @@ impl<T: AsyncTransport> Ble<T> {
     /// ```ignore
     /// let mut ble = Ble::new(transport).await?;
     /// ```
-    pub async fn new(transport: T) -> Result<Self, RpcError> {
+    pub async fn new(transport: T) -> Result<Self, BleError> {
         let mut client = RpcClient::new(transport);
-        client.init().await?;
+        client.init().await.map_err(|_| BleError::RpcError)?;
         Ok(Self { client })
     }
 
@@ -55,7 +61,7 @@ impl<T: AsyncTransport> Ble<T> {
     /// ```ignore
     /// ble.bt_enable().await?;
     /// ```
-    pub async fn bt_enable(&mut self) -> Result<i32, RpcError> {
+    pub async fn bt_enable(&mut self) -> Result<(), BleError> {
         let packet = PacketBuilder::<64>::new()
             .command(
                 self.client.context_id(),
@@ -64,11 +70,15 @@ impl<T: AsyncTransport> Ble<T> {
                 self.client.bt_rpc_group_id(),
                 self.client.bt_rpc_group_id(),
             )
-            .cbor_uint(28)?
-            .cbor_uint(28)?
-            .cbor_null()?;
+            .cbor_uint(28)
+            .unwrap()
+            .cbor_uint(28)
+            .unwrap()
+            .cbor_null()
+            .unwrap();
 
-        self.client.send_command(packet.as_slice()).await
+        self.client.send_command(packet.as_slice()).await.unwrap();
+        Ok(())
     }
 
     /// Start BLE advertising
@@ -85,7 +95,7 @@ impl<T: AsyncTransport> Ble<T> {
         param: &BtLeAdvParam,
         ad: &[BtData<'a>],
         sd: &[BtData<'a>],
-    ) -> Result<i32, RpcError> {
+    ) -> Result<(), BleError> {
         let packet = encode_bt_le_adv_start::<256>(
             self.client.context_id(),
             self.client.bt_rpc_group_id(),
@@ -93,9 +103,15 @@ impl<T: AsyncTransport> Ble<T> {
             param,
             ad,
             sd,
-        )?;
+        )
+        .map_err(|_| BleError::InvalidParameter)?;
 
-        self.client.send_command(packet.as_slice()).await
+        self.client
+            .send_command(packet.as_slice())
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(())
     }
 }
 
