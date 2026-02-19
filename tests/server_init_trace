@@ -1,0 +1,171 @@
+*** Booting nRF Connect SDK v3.2.1-d8887f6f32df ***
+*** Using Zephyr OS v4.2.99-ec78104f1569 ***
+[00:00:00.003,234] <inf> nrf_ps_server: Initializing RPC server
+[00:00:00.003,265] <dbg> NRF_RPC: Initializing nRF RPC module
+[00:00:00.003,295] <dbg> NRF_RPC: Group 'bt_rpc' has id 0
+[00:00:00.003,295] <dbg> NRF_RPC: Group 'rpc_utils' has id 1
+[00:00:00.005,157] <dbg> NRF_RPC: Done initializing nRF RPC module
+[00:00:00.005,187] <dbg> nrf_rpc_uart: init called
+[00:00:00.005,889] <dbg> nrf_rpc_uart: <<< TX packet 0c1a
+                                       04 00 ff 00 ff 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:03.727,020] <dbg> nrf_rpc_uart: >>> RX packet 0c1a
+                                       04 00 ff 00 ff 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:03.727,600] <dbg> nrf_rpc_uart: <<< TX ack 0c1a
+[00:00:03.727,691] <dbg> NRF_RPC: Received 12 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 0 (unknown)
+[00:00:03.727,722] <dbg> NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0
+[00:00:03.727,813] <dbg> nrf_rpc_uart: >>> RX ack 0c1a
+[00:00:03.727,844] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:03.727,935] <dbg> nrf_rpc_uart: <<< TX packet c251
+                                       04 00 ff 01 ff 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:03.728,546] <dbg> nrf_rpc_uart: >>> RX packet c251
+                                       04 00 ff 01 ff 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:03.728,546] <dbg> nrf_rpc_uart: <<< TX ack c251
+[00:00:03.728,668] <dbg> NRF_RPC: Received 15 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 1 (unknown)
+[00:00:03.728,698] <dbg> NRF_RPC: Found corresponding local group. Remote id: 1, Local id: 1
+[00:00:03.728,759] <dbg> nrf_rpc_uart: >>> RX ack c251
+[00:00:03.728,820] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:03.728,942] <dbg> nrf_rpc_uart: <<< TX packet 7e33
+                                       04 00 ff 00 00 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:03.729,492] <dbg> nrf_rpc_uart: >>> RX packet 7e33
+                                       04 00 ff 00 00 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:03.729,492] <dbg> nrf_rpc_uart: <<< TX ack 7e33
+[00:00:03.729,614] <dbg> NRF_RPC: Received 12 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 0 (unknown)
+[00:00:03.729,614] <dbg> NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0
+[00:00:03.729,705] <dbg> nrf_rpc_uart: >>> RX ack 7e33
+[00:00:03.729,827] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:03.729,949] <dbg> nrf_rpc_uart: <<< TX packet c75d
+                                       04 00 ff 01 01 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:03.730,377] <dbg> nrf_rpc_uart: >>> RX ack c75d
+[00:00:03.730,499] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:03.730,682] <inf> nrf_ps_server: RPC server ready
+[00:00:03.730,865] <dbg> nrf_rpc_uart: >>> RX packet c75d
+                                       04 00 ff 01 01 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:03.730,895] <dbg> nrf_rpc_uart: <<< TX ack c75d
+[00:00:03.730,987] <dbg> NRF_RPC: Received 15 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 1 (unknown)
+[00:00:03.731,018] <dbg> NRF_RPC: Found corresponding local group. Remote id: 1, Local id: 1
+[00:00:10.546,173] <dbg> nrf_rpc_uart: >>> RX packet 0c1a
+                                       04 00 ff 00 ff 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:10.546,173] <dbg> nrf_rpc_uart: <<< TX ack 0c1a
+[00:00:10.546,295] <dbg> NRF_RPC: Received 12 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 0 (unknown)
+[00:00:10.546,325] <dbg> NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0
+[00:00:10.546,813] <dbg> nrf_rpc_uart: >>> RX packet c251
+                                       04 00 ff 01 ff 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:10.546,813] <dbg> nrf_rpc_uart: <<< TX ack c251
+[00:00:10.546,936] <dbg> NRF_RPC: Received 15 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 1 (unknown)
+[00:00:10.546,936] <dbg> NRF_RPC: Found corresponding local group. Remote id: 1, Local id: 1
+[00:00:10.547,027] <dbg> nrf_rpc_uart: <<< TX packet 7e33
+                                       04 00 ff 00 00 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:10.547,424] <dbg> nrf_rpc_uart: >>> RX ack 7e33
+[00:00:10.547,546] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:10.547,637] <dbg> nrf_rpc_uart: <<< TX packet c75d
+                                       04 00 ff 01 01 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:10.548,095] <dbg> nrf_rpc_uart: >>> RX ack c75d
+[00:00:10.548,187] <dbg> nrf_rpc_uart: Acked successfully
+uart:~$ 
+*** Booting nRF Connect SDK v3.2.1-d8887f6f32df ***
+*** Using Zephyr OS v4.2.99-ec78104f1569 ***
+[00:00:00.003,143] <inf> nrf_ps_server: Initializing RPC server
+[00:00:00.003,143] <dbg> NRF_RPC: Initializing nRF RPC module
+[00:00:00.003,173] <dbg> NRF_RPC: Group 'bt_rpc' has id 0
+[00:00:00.003,204] <dbg> NRF_RPC: Group 'rpc_utils' has id 1
+[00:00:00.005,065] <dbg> NRF_RPC: Done initializing nRF RPC module
+[00:00:00.005,065] <dbg> nrf_rpc_uart: init called
+[00:00:00.005,798] <dbg> nrf_rpc_uart: <<< TX packet 0c1a
+                                       04 00 ff 00 ff 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:00.056,091] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.106,414] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.156,738] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.156,799] <err> NRF_RPC: Failed to send group init packet for group id: 0 strid: bt_rpc err: -71
+[00:00:00.156,890] <dbg> nrf_rpc_uart: <<< TX packet c251
+                                       04 00 ff 01 ff 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:00.207,244] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.257,598] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.307,952] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.308,013] <err> NRF_RPC: Failed to send group init packet for group id: 1 strid: rpc_utils err: -71
+[00:00:01.866,485] <dbg> nrf_rpc_uart: >>> RX packet 0c1a
+                                       04 00 ff 00 ff 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:01.866,516] <dbg> nrf_rpc_uart: <<< TX ack 0c1a
+[00:00:01.866,607] <dbg> NRF_RPC: Received 12 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 0 (unknown)
+[00:00:01.866,638] <dbg> NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0
+[00:00:01.867,126] <dbg> nrf_rpc_uart: >>> RX packet c251
+                                       04 00 ff 01 ff 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:01.867,126] <dbg> nrf_rpc_uart: <<< TX ack c251
+[00:00:01.867,248] <dbg> NRF_RPC: Received 15 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 1 (unknown)
+[00:00:01.867,248] <dbg> NRF_RPC: Found corresponding local group. Remote id: 1, Local id: 1
+[00:00:01.867,340] <dbg> nrf_rpc_uart: <<< TX packet 7e33
+                                       04 00 ff 00 00 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:01.867,736] <dbg> nrf_rpc_uart: >>> RX ack 7e33
+[00:00:01.867,858] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:01.867,980] <dbg> nrf_rpc_uart: <<< TX packet c75d
+                                       04 00 ff 01 01 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:01.868,408] <dbg> nrf_rpc_uart: >>> RX ack c75d
+[00:00:01.868,530] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:01.868,591] <inf> nrf_ps_server: RPC server ready
+uart:~$ 
+*** Booting nRF Connect SDK v3.2.1-d8887f6f32df ***
+*** Using Zephyr OS v4.2.99-ec78104f1569 ***
+[00:00:00.003,143] <inf> nrf_ps_server: Initializing RPC server
+[00:00:00.003,173] <dbg> NRF_RPC: Initializing nRF RPC module
+[00:00:00.003,204] <dbg> NRF_RPC: Group 'bt_rpc' has id 0
+[00:00:00.003,204] <dbg> NRF_RPC: Group 'rpc_utils' has id 1
+[00:00:00.005,096] <dbg> NRF_RPC: Done initializing nRF RPC module
+[00:00:00.005,096] <dbg> nrf_rpc_uart: init called
+[00:00:00.005,798] <dbg> nrf_rpc_uart: <<< TX packet 0c1a
+                                       04 00 ff 00 ff 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:00.056,121] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.106,445] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.156,768] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.156,829] <err> NRF_RPC: Failed to send group init packet for group id: 0 strid: bt_rpc err: -71
+[00:00:00.156,921] <dbg> nrf_rpc_uart: <<< TX packet c251
+                                       04 00 ff 01 ff 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:00.207,244] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.257,598] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.307,952] <wrn> nrf_rpc_uart: Ack timeout
+[00:00:00.308,013] <err> NRF_RPC: Failed to send group init packet for group id: 1 strid: rpc_utils err: -71
+[00:00:07.055,816] <dbg> nrf_rpc_uart: >>> RX packet 0c1a
+                                       04 00 ff 00 ff 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:07.055,847] <dbg> nrf_rpc_uart: <<< TX ack 0c1a
+[00:00:07.055,969] <dbg> NRF_RPC: Received 12 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 0 (unknown)
+[00:00:07.055,969] <dbg> NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0
+[00:00:07.056,457] <dbg> nrf_rpc_uart: >>> RX packet c251
+                                       04 00 ff 01 ff 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:07.056,488] <dbg> nrf_rpc_uart: <<< TX ack c251
+[00:00:07.056,579] <dbg> NRF_RPC: Received 15 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 1 (unknown)
+[00:00:07.056,610] <dbg> NRF_RPC: Found corresponding local group. Remote id: 1, Local id: 1
+[00:00:07.056,671] <dbg> nrf_rpc_uart: <<< TX packet 7e33
+                                       04 00 ff 00 00 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:07.057,067] <dbg> nrf_rpc_uart: >>> RX ack 7e33
+[00:00:07.057,220] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:07.057,312] <dbg> nrf_rpc_uart: <<< TX packet c75d
+                                       04 00 ff 01 01 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:07.057,739] <dbg> nrf_rpc_uart: >>> RX ack c75d
+[00:00:07.057,861] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:07.057,922] <inf> nrf_ps_server: RPC server ready
+uart:~$ 
+*** Booting nRF Connect SDK v3.2.1-d8887f6f32df ***
+*** Using Zephyr OS v4.2.99-ec78104f1569 ***
+[00:00:00.003,265] <inf> nrf_ps_server: Initializing RPC server
+[00:00:00.003,265] <dbg> NRF_RPC: Initializing nRF RPC module
+[00:00:00.003,295] <dbg> NRF_RPC: Group 'bt_rpc' has id 0
+[00:00:00.003,326] <dbg> NRF_RPC: Group 'rpc_utils' has id 1
+[00:00:00.005,096] <dbg> NRF_RPC: Done initializing nRF RPC module
+[00:00:00.005,096] <dbg> nrf_rpc_uart: init called
+[00:00:00.005,828] <dbg> nrf_rpc_uart: <<< TX packet 0c1a
+                                       04 00 ff 00 ff 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:00.006,225] <dbg> nrf_rpc_uart: >>> RX ack 0c1a
+[00:00:00.006,317] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:00.006,408] <dbg> nrf_rpc_uart: <<< TX packet c251
+                                       04 00 ff 01 ff 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:00.006,866] <dbg> nrf_rpc_uart: >>> RX ack c251
+[00:00:00.006,958] <dbg> nrf_rpc_uart: Acked successfully
+[00:00:00.007,263] <dbg> nrf_rpc_uart: >>> RX packet 7e33
+                                       04 00 ff 00 00 00 62 74  5f 72 70 63             |......bt _rpc    
+[00:00:00.007,263] <dbg> nrf_rpc_uart: <<< TX ack 7e33
+[00:00:00.007,385] <dbg> NRF_RPC: Received 12 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 0 (unknown)
+[00:00:00.007,415] <dbg> NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0
+[00:00:00.007,934] <dbg> nrf_rpc_uart: >>> RX packet c75d
+                                       04 00 ff 01 01 00 72 70  63 5f 75 74 69 6c 73    |......rp c_utils 
+[00:00:00.007,965] <dbg> nrf_rpc_uart: <<< TX ack c75d
+[00:00:00.008,056] <dbg> NRF_RPC: Received 15 bytes packet from 255 to 255, type 0x04, cmd/evt/cnt 0x00, grp 1 (unknown)
+[00:00:00.008,087] <dbg> NRF_RPC: Found corresponding local group. Remote id: 1, Local id: 1
+[00:00:00.008,270] <inf> nrf_ps_server: RPC server ready

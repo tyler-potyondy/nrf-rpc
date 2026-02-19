@@ -12,6 +12,7 @@
 //!
 //! Source: https://github.com/nrfconnect/sdk-nrfxlib/blob/6204e5fcdac22b4309c72b990857fcc28d8c3095/nrf_rpc/doc/protocol_specification.rst
 
+use crate::cbor_encoding::CBorPayload;
 use core::marker::PhantomData;
 
 const EVENT_PACKET_TYPE: u8 = 0x00;
@@ -147,129 +148,176 @@ const COMMAND_ID_FIELD_UNUSED: u8 = 0xFF;
 ///       18 64: CBOR unsigned int (100)
 ///       63 62 61 72: CBOR text string ("bar")
 ///       f6: CBOR null
-struct NrfRpcPacket<T: NrfRpcPacketType, const N: usize> {
+pub struct NrfRpcPacket<'a, T: NrfRpcPacketType> {
     src_context_id: Option<u8>, // Only set for command packets
     dst_context_id: u8,
     src_group_id: u8,
     dst_group_id: u8,
-    payload: [u8; N],
+    payload: &'a [u8],
     associated_packet_type: PhantomData<T>,
 }
 
-struct CBorPayload<const N: usize>([u8; N]);
-
-impl<const N: usize, C: CommandId> NrfRpcPacket<Event<C>, N> {
+impl<'a, C: CommandId> NrfRpcPacket<'a, Event<C>> {
     fn new(
         dst_context_id: u8,
         src_group_id: u8,
         dst_group_id: u8,
-        cbor_encoded_payload: CBorPayload<N>,
+        cbor_encoded_payload: CBorPayload<'a>,
     ) -> Self {
         Self {
             src_context_id: None,
             dst_context_id,
             src_group_id,
             dst_group_id,
-            payload: cbor_encoded_payload.0,
+            payload: cbor_encoded_payload.into(),
             associated_packet_type: PhantomData,
         }
     }
 }
 
-impl<const N: usize, C: CommandId> NrfRpcPacket<Response<C>, N> {
+impl<'a, C: CommandId> NrfRpcPacket<'a, Response<C>> {
     fn new(
         dst_context_id: u8,
         src_group_id: u8,
         dst_group_id: u8,
-        cbor_encoded_payload: CBorPayload<N>,
+        cbor_encoded_payload: CBorPayload<'a>,
     ) -> Self {
         Self {
             src_context_id: None,
             dst_context_id,
             src_group_id,
             dst_group_id,
-            payload: cbor_encoded_payload.0,
+            payload: cbor_encoded_payload.into(),
             associated_packet_type: PhantomData,
         }
     }
 }
 
-impl<C: CommandId> NrfRpcPacket<EventAck<C>, 0> {
+impl<'a, C: CommandId> NrfRpcPacket<'a, EventAck<C>> {
     fn new(dst_context_id: u8, src_group_id: u8, dst_group_id: u8) -> Self {
         Self {
             src_context_id: None,
             dst_context_id,
             src_group_id,
             dst_group_id,
-            payload: [],
+            payload: &[],
             associated_packet_type: PhantomData,
         }
     }
 }
 
+pub struct NrfRpcErrorCode<'a>(&'a mut [u8; 4]);
+impl<'a> NrfRpcErrorCode<'a> {
+    pub fn new(buffer: &'a mut [u8; 4]) -> Self {
+        Self(buffer)
+    }
+
+    pub fn set_error_code(&mut self, error_code: u32) {
+        self.0.copy_from_slice(&error_code.to_le_bytes());
+    }
+}
+
+impl<'a> Into<&'a [u8]> for NrfRpcErrorCode<'a> {
+    fn into(self) -> &'a [u8] {
+        &self.0[..]
+    }
+}
+
 // ErrorReport packets have a fixed payload size of 4 bytes (32-bit error code)
-impl NrfRpcPacket<ErrorReport, 4> {
+impl<'a> NrfRpcPacket<'a, ErrorReport> {
     // Error report: the payload is a 32-bit integer representing an error code, in
     // little-endian byte order.
-    fn new(dst_context_id: u8, src_group_id: u8, dst_group_id: u8, error_code: u32) -> Self {
+    fn new(
+        dst_context_id: u8,
+        src_group_id: u8,
+        dst_group_id: u8,
+        error_code: NrfRpcErrorCode<'a>,
+    ) -> Self {
         Self {
             src_context_id: None,
             dst_context_id,
             src_group_id,
             dst_group_id,
-            payload: error_code.to_le_bytes(),
+            payload: error_code.into(),
             associated_packet_type: PhantomData,
         }
     }
 }
 
-impl<const N: usize, C: CommandId> NrfRpcPacket<Command<C>, N> {
-    fn new(
+impl<'a, C: CommandId> NrfRpcPacket<'a, Command<C>> {
+    pub fn new(
         src_context_id: u8,
         dst_context_id: u8,
         src_group_id: u8,
         dst_group_id: u8,
-        payload: [u8; N],
+        payload: CBorPayload<'a>,
     ) -> Self {
         Self {
             src_context_id: Some(src_context_id),
             dst_context_id,
             src_group_id,
             dst_group_id,
-            payload,
+            payload: payload.into(),
             associated_packet_type: PhantomData,
         }
     }
 }
 
-struct MinVersion(u8);
-struct MaxVersion(u8);
-
-struct InitPacketPayload<const N: usize> {
-    max_version: MaxVersion,
-    min_version: MinVersion,
-    group_name: [u8; N],
+struct InitPacketPayload<'a, const N: usize> {
+    data: &'a mut [u8; N],
 }
 
-impl<const N: usize> NrfRpcPacket<Init, N> {
+impl<'a, const N: usize> InitPacketPayload<'a, N> {
+    pub fn new(buffer: &'a mut [u8; N]) -> Self {
+        Self { data: buffer }
+    }
+
+    pub fn set_version(&mut self, max_version: u8, min_version: u8) {
+        self.data[0] = (max_version & 0x0F) | ((min_version & 0x0F) << 4);
+    }
+
+    pub fn set_group_name(&mut self, group_name: &str) -> Result<(), ()> {
+        let name_bytes = group_name.as_bytes();
+        if name_bytes.len() > self.data.len() - 1 {
+            return Err(()); // Not enough space for group name
+        }
+
+        // (todo) this panic path should not be reached due to above check,
+        // but it would be better to statically guarantee this.
+        self.data[1..1 + name_bytes.len()].copy_from_slice(name_bytes);
+        Ok(())
+    }
+}
+
+impl<'a, const N: usize> Into<&'a [u8]> for InitPacketPayload<'a, N> {
+    fn into(self) -> &'a [u8] {
+        &self.data[..]
+    }
+}
+
+impl<'a> NrfRpcPacket<'a, Init> {
     // (todo) use flux or nightly feature for const generic arith
     // to add this to the type system (instead of just payload array here).
     // Max Version: bits 0-3 (byte 0)
     // Min Version: bits 4-7 (byte 0)
     // Group name: byte 1 to N
-    const fn new(src_group_id: u8, dst_group_id: u8, payload: [u8; N]) -> Self {
+    fn new<const N: usize>(
+        src_group_id: u8,
+        dst_group_id: u8,
+        init_payload: InitPacketPayload<'a, N>,
+    ) -> Self {
         Self {
             src_context_id: None,
             dst_context_id: 0xFF, // Unknown destination context ID for init packets
             src_group_id,
             dst_group_id,
-            payload: payload,
+            payload: init_payload.into(),
             associated_packet_type: PhantomData,
         }
     }
 }
 
-impl<const N: usize, P: NrfRpcPacketType> NrfRpcPacket<P, N> {
+impl<'a, P: NrfRpcPacketType> NrfRpcPacket<'a, P> {
     fn form_header(&self) -> [u8; 5] {
         let type_byte = P::TypeField | self.src_context_id.unwrap_or(0);
         let command_id_byte = P::CommandIdField;
@@ -282,51 +330,68 @@ impl<const N: usize, P: NrfRpcPacketType> NrfRpcPacket<P, N> {
         ]
     }
 
-    fn form_payload(&self) -> [u8; N] {
-        self.payload
+    /// Provided an RpcTransportBuffer, copy the formed nrf rpc packet into the
+    /// buffer. Returns Result<(), ErrorCode>.
+    pub fn write_into<const N: usize>(
+        &self,
+        buf: &mut crate::RpcTransportBuffer<N>,
+    ) -> Result<(), ()> {
+        // (todo) error code update to not be `()`
+        // (todo) this requires copying. I would rather this be zero copy,
+        // but alas...we could pretty easily do some unsafe shenanigans
+        // to avoid copying, but for now we will just copy.
+        if buf.remaining_len() < self.payload.len() + 5 {
+            return Err(()); // Buffer too small
+        }
+
+        // (todo) it would be nice to avoid this panic path.
+        let header = self.form_header();
+        buf.write_into_or_err(&header)?;
+        buf.write_into_or_err(self.payload)?;
+        Ok(())
     }
 }
 
-trait CommandId {
+pub trait CommandId {
     const COMMAND_ID: u8;
 }
 
-trait NrfRpcPacketType {
+pub trait NrfRpcPacketType {
     const TypeField: u8;
     const CommandIdField: u8;
 }
 
-struct Event<C: CommandId>(PhantomData<C>);
+pub struct Event<C: CommandId>(PhantomData<C>);
 impl<C: CommandId> NrfRpcPacketType for Event<C> {
     const CommandIdField: u8 = C::COMMAND_ID;
     const TypeField: u8 = 0x00;
 }
 
-struct Response<C: CommandId>(PhantomData<C>);
+pub struct Response<C: CommandId>(PhantomData<C>);
 impl<C: CommandId> NrfRpcPacketType for Response<C> {
     const CommandIdField: u8 = C::COMMAND_ID;
     const TypeField: u8 = RESPONSE_PACKET_TYPE;
 }
 
-struct EventAck<C: CommandId>(PhantomData<C>);
+pub struct EventAck<C: CommandId>(PhantomData<C>);
 impl<C: CommandId> NrfRpcPacketType for EventAck<C> {
     const CommandIdField: u8 = C::COMMAND_ID;
     const TypeField: u8 = EVENT_ACK_PACKET_TYPE;
 }
 
-struct ErrorReport;
+pub struct ErrorReport;
 impl NrfRpcPacketType for ErrorReport {
     const CommandIdField: u8 = unimplemented!();
     const TypeField: u8 = ERROR_REPORT_PACKET_TYPE;
 }
 
-struct Init;
+pub struct Init;
 impl NrfRpcPacketType for Init {
     const CommandIdField: u8 = COMMAND_ID_FIELD_UNUSED;
     const TypeField: u8 = INIT_PACKET_TYPE;
 }
 
-struct Command<C: CommandId>(PhantomData<C>);
+pub struct Command<C: CommandId>(PhantomData<C>);
 impl<C: CommandId> NrfRpcPacketType for Command<C> {
     const CommandIdField: u8 = C::COMMAND_ID;
     const TypeField: u8 = COMMAND_PACKET_TYPE_BASE;

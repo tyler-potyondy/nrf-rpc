@@ -9,7 +9,9 @@ mod uart_transport;
 
 pub use transport::{AsyncTransport, TransportError};
 
-use cbor_encoding::{CborError, PacketBuilder};
+use cbor_encoding::CborError;
+
+use crate::packet::NrfRpcPacket;
 
 /// RPC client errors
 #[derive(Debug)]
@@ -37,6 +39,26 @@ impl From<CborError> for RpcError {
     }
 }
 
+pub struct RpcTransportBuffer<const N: usize> {
+    buffer: [u8; N],
+    pos: usize,
+}
+
+impl<const N: usize> RpcTransportBuffer<N> {
+    pub fn remaining_len(&self) -> usize {
+        N - self.pos
+    }
+
+    pub fn write_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
+        if self.pos + data.len() > N {
+            return Err(());
+        }
+        self.buffer[self.pos..self.pos + data.len()].copy_from_slice(data);
+        self.pos += data.len();
+        Ok(())
+    }
+}
+
 /// NRF RPC Client
 ///
 /// Generic over a transport. The transport can be any implementation
@@ -60,6 +82,7 @@ impl<T: AsyncTransport> RpcClient<T> {
 
     /// Initialize RPC client by registering bt_rpc and rpc_utils groups
     pub async fn init(&mut self) -> Result<(), RpcError> {
+        /*
         let bt_rpc_init = PacketBuilder::<64>::new().init(0x00, "bt_rpc");
         self.send_packet(bt_rpc_init.as_slice()).await?;
 
@@ -77,7 +100,7 @@ impl<T: AsyncTransport> RpcClient<T> {
         if len >= 5 && response_buf[0] == 0x04 {
             self.rpc_utils_group_id = response_buf[4];
         }
-
+        */
         Ok(())
     }
 
@@ -90,9 +113,20 @@ impl<T: AsyncTransport> RpcClient<T> {
         self.bt_rpc_group_id
     }
 
-    pub(crate) async fn send_packet(&mut self, packet: &[u8]) -> Result<(), RpcError> {
+    pub(crate) async fn send_packet<'a, P: crate::packet::NrfRpcPacketType>(
+        &mut self,
+        packet: NrfRpcPacket<'a, P>,
+    ) -> Result<(), RpcError> {
+        let mut buf = RpcTransportBuffer::<256> {
+            buffer: [0u8; 256],
+            pos: 0,
+        };
+        packet
+            .write_into(&mut buf)
+            .map_err(|_| RpcError::InvalidResponse)?;
+
         self.transport
-            .write(packet)
+            .write(&buf.buffer[..buf.pos])
             .await
             .map_err(|_| RpcError::Transport)?;
         Ok(())
@@ -105,24 +139,24 @@ impl<T: AsyncTransport> RpcClient<T> {
             .map_err(|_| RpcError::Transport)
     }
 
-    pub(crate) async fn send_command(&mut self, packet: &[u8]) -> Result<i32, RpcError> {
-        self.send_packet(packet).await?;
+    // pub(crate) async fn send_command(&mut self, packet: &[u8]) -> Result<i32, RpcError> {
+    //     self.send_packet(packet).await?;
 
-        let mut response_buf = [0u8; 256];
-        let len = self.receive_packet(&mut response_buf).await?;
+    //     let mut response_buf = [0u8; 256];
+    //     let len = self.receive_packet(&mut response_buf).await?;
 
-        //if len < 5 {
-        //    return Err(RpcError::InvalidResponse);
-        //}
-        Ok(5)
-        // let packet_type = response_buf[0] & 0x7F;
-        // if packet_type != 0x01 {
-        //     return Err(RpcError::InvalidResponse);
-        // }
+    //     //if len < 5 {
+    //     //    return Err(RpcError::InvalidResponse);
+    //     //}
+    //     Ok(5)
+    //     // let packet_type = response_buf[0] & 0x7F;
+    //     // if packet_type != 0x01 {
+    //     //     return Err(RpcError::InvalidResponse);
+    //     // }
 
-        // let payload = &response_buf[5..len];
-        // self.decode_i32_response(payload)
-    }
+    //     // let payload = &response_buf[5..len];
+    //     // self.decode_i32_response(payload)
+    // }
 
     fn decode_i32_response(&self, payload: &[u8]) -> Result<i32, RpcError> {
         use minicbor::decode::Decoder;

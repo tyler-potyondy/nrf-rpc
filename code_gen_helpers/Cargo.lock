@@ -12,20 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "minicbor"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0452a60c1863c1f50b5f77cd295e8d2786849f35883f0b9e18e7e6e1b5691b0"
-
-[[package]]
-name = "nrf-rpc"
-version = "0.1.0"
-dependencies = [
- "code_gen_helpers",
- "minicbor",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"

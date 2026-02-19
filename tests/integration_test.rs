@@ -7,10 +7,6 @@
 //! rx/tx to a unix socket. The test here then provides a mock transport layer that
 //! directs client writes to this socket and polls for responses on the socket.
 
-use nrf_rpc::ble::{
-    BT_DATA_FLAGS, BT_DATA_NAME_COMPLETE, BT_LE_AD_GENERAL, BT_LE_AD_NO_BREDR, Ble, BtData,
-    BtLeAdvParam,
-};
 use nrf_rpc::{AsyncTransport, TransportError};
 use std::collections::HashSet;
 use std::io::{BufRead, Read};

@@ -1,3 +1,4 @@
+/*
 /// Builder for constructing NRF RPC packets
 ///
 /// Note: This is exposed for testing purposes only. Use the `Ble` struct for normal usage.
@@ -111,34 +112,6 @@ impl<const N: usize> PacketBuilder<N> {
     }
 }
 
-/// A writer that writes to a mutable slice and tracks position
-struct SliceWriter<'a> {
-    slice: &'a mut [u8],
-    pos: usize,
-}
-
-impl<'a> SliceWriter<'a> {
-    fn new(slice: &'a mut [u8]) -> Self {
-        Self { slice, pos: 0 }
-    }
-
-    fn pos(&self) -> usize {
-        self.pos
-    }
-}
-
-impl<'a> minicbor::encode::Write for SliceWriter<'a> {
-    type Error = CborError;
-
-    fn write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
-        if self.pos + buf.len() > self.slice.len() {
-            return Err(CborError::BufferTooSmall);
-        }
-        self.slice[self.pos..self.pos + buf.len()].copy_from_slice(buf);
-        self.pos += buf.len();
-        Ok(())
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -193,6 +166,130 @@ mod tests {
 
 use minicbor::encode::Encoder;
 
+
+/// Packet type identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PacketType {
+    Event = 0x00,
+    Response = 0x01,
+    EventAck = 0x02,
+    ErrorReport = 0x03,
+    Init = 0x04,
+    Command = 0x80,
+}
+*/
+use minicbor::Encoder;
+
+pub struct CBorPayload<'a>(&'a [u8]);
+impl<'a> Into<&'a [u8]> for CBorPayload<'a> {
+    fn into(self) -> &'a [u8] {
+        self.0
+    }
+}
+
+pub struct CborPayloadBuilder<'a> {
+    buffer: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> CborPayloadBuilder<'a> {
+    pub fn new(buffer: &'a mut [u8]) -> Self {
+        Self { buffer, pos: 0 }
+    }
+
+    fn encode<F>(&mut self, encode_fn: F) -> Result<&mut Self, CborError>
+    where
+        F: FnOnce(&mut Encoder<SliceWriter>) -> Result<(), CborError>,
+    {
+        let writer = SliceWriter::new(&mut self.buffer[self.pos..]); // No need for mut
+        let mut encoder = Encoder::new(writer); // Declare encoder as mutable
+        encode_fn(&mut encoder)?; // Ensure this returns Result<(), CborError>
+        self.pos += encoder.writer().pos(); // Use encoder to get position
+        Ok(self)
+    }
+
+    pub fn encode_uint(mut self, value: u64) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.u64(value)?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?;
+        Ok(self)
+    }
+
+    pub fn cbor_int(mut self, value: i64) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.i64(value)?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?;
+        Ok(self)
+    }
+
+    pub fn cbor_bytes(mut self, bytes: &[u8]) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.bytes(bytes)?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?;
+        Ok(self)
+    }
+
+    pub fn cbor_str(mut self, s: &str) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.str(s)?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?;
+        Ok(self)
+    }
+
+    pub fn cbor_null(mut self) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.null()?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?;
+        Ok(self)
+    }
+
+    pub fn build(mut self) -> Result<CBorPayload<'a>, CborError> {
+        self.encode(|encoder| {
+            encoder.null()?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?; // Add CBOR null terminator (0xF6)
+
+        let new_buffer = &self.buffer[..self.pos];
+        Ok(CBorPayload(new_buffer))
+    }
+}
+
+/// A writer that writes to a mutable slice and tracks position
+struct SliceWriter<'a> {
+    slice: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> SliceWriter<'a> {
+    fn new(slice: &'a mut [u8]) -> Self {
+        Self { slice, pos: 0 }
+    }
+
+    fn pos(&self) -> usize {
+        self.pos
+    }
+}
+
+impl<'a> minicbor::encode::Write for SliceWriter<'a> {
+    type Error = CborError;
+
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+        if self.pos + buf.len() > self.slice.len() {
+            return Err(CborError::BufferTooSmall);
+        }
+        self.slice[self.pos..self.pos + buf.len()].copy_from_slice(buf);
+        self.pos += buf.len();
+        Ok(())
+    }
+}
+
+// todo
 /// CBOR encoding error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CborError {
@@ -213,16 +310,4 @@ impl From<minicbor::encode::Error<CborError>> for CborError {
     fn from(_: minicbor::encode::Error<CborError>) -> Self {
         CborError::EncodingError
     }
-}
-
-/// Packet type identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum PacketType {
-    Event = 0x00,
-    Response = 0x01,
-    EventAck = 0x02,
-    ErrorReport = 0x03,
-    Init = 0x04,
-    Command = 0x80,
 }
