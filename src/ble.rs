@@ -24,6 +24,9 @@ use crate::cbor_encoding::{CborError, CborPayloadBuilder};
 use crate::packet::{self, CommandId, NrfRpcPacket};
 use crate::{AsyncTransport, RpcClient, RpcError};
 
+const BT_RPC_GROUP_ID: u8 = 0x0;
+const RPC_UTILS_GROUP_ID: u8 = 0x1;
+
 // ============================================================================
 // Ble Struct
 // ============================================================================
@@ -185,27 +188,14 @@ impl<T: AsyncTransport> Ble<T> {
     /// ble.bt_enable().await?;
     /// ```
     pub async fn bt_enable(&mut self) -> Result<(), BleError> {
-        let write_buffer = &mut [0u8; 16]; // Allocate a buffer for CBOR encoding (adjust size as needed)
         let mut buffer = [0u8; 16]; // Allocate a buffer for CBOR encoding (adjust size as needed)
         let cbor_args = CborPayloadBuilder::new(&mut buffer); // No arguments for bt_enable
-        let packet = cbor_args.build().map_err(|_| BleError::InvalidParameter)?; // Build CBOR payload (just a null terminator)
+        let payload = cbor_args.build().map_err(|_| BleError::InvalidParameter)?;
 
-        let packet = NrfRpcPacket::<packet::Command<BtEnableRpcCmd>>::new(0, 0, 0, 0, packet);
+        let packet = NrfRpcPacket::<packet::Command<BtEnableRpcCmd>>::new(0, 0, 0, 0, payload);
         self.client
             .send_packet(packet)
             .await
-            .map_err(|_| BleError::RpcError)?;
-        unimplemented!()
-        // let packet = crate::packet::NrfRpcPacket(
-        //     self.client.context_id(),
-        //     crate::packet::BT_ENABLE_RPC_CMD,
-        //     0xFF,
-        //     self.client.bt_rpc_group_id(),
-        //     self.client.bt_rpc_group_id(),
-        //     cbor_args.build().map_err(|_| BleError::InvalidParameter)?,
-        // );
-
-        // self.client.send_packet(packet).await.unwrap();
-        // Ok(())
+            .map_err(|_| BleError::RpcError)
     }
 }

@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 pub mod ble;
 mod cbor_encoding;
 #[doc(hidden)]
@@ -22,6 +25,8 @@ pub enum RpcError {
     Timeout,
 }
 
+const NRF_RPC_PROTOCOL_VERSION: u8 = 0;
+
 impl core::fmt::Display for RpcError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -39,18 +44,28 @@ impl From<CborError> for RpcError {
     }
 }
 
-pub struct RpcTransportBuffer<const N: usize> {
-    buffer: [u8; N],
+pub struct RpcTransportBuffer<'a> {
+    buffer: &'a mut [u8],
     pos: usize,
 }
 
-impl<const N: usize> RpcTransportBuffer<N> {
+impl<'a> Into<&'a [u8]> for RpcTransportBuffer<'a> {
+    fn into(self) -> &'a [u8] {
+        &self.buffer[..self.pos]
+    }
+}
+
+impl<'a> RpcTransportBuffer<'a> {
+    pub fn new(buffer: &'a mut [u8]) -> Self {
+        Self { buffer, pos: 0 }
+    }
+
     pub fn remaining_len(&self) -> usize {
-        N - self.pos
+        self.buffer.len() - self.pos
     }
 
     pub fn write_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
-        if self.pos + data.len() > N {
+        if self.pos + data.len() > self.buffer.len() {
             return Err(());
         }
         self.buffer[self.pos..self.pos + data.len()].copy_from_slice(data);
@@ -74,34 +89,46 @@ impl<T: AsyncTransport> RpcClient<T> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,
-            bt_rpc_group_id: 0xFF,
-            rpc_utils_group_id: 0xFF,
+            bt_rpc_group_id: 0x0,
+            rpc_utils_group_id: 0x1,
             context_id: 0,
         }
     }
 
     /// Initialize RPC client by registering bt_rpc and rpc_utils groups
     pub async fn init(&mut self) -> Result<(), RpcError> {
-        /*
-        let bt_rpc_init = PacketBuilder::<64>::new().init(0x00, "bt_rpc");
-        self.send_packet(bt_rpc_init.as_slice()).await?;
+        let mut buffer = [0u8; 64];
+        let bt_rpc_init_packet_payload = packet::InitPacketPayload::new(
+            &mut buffer,
+            NRF_RPC_PROTOCOL_VERSION,
+            NRF_RPC_PROTOCOL_VERSION,
+            "bt_rpc",
+        )
+        .expect("Failed to build bt_rpc init packet");
 
-        let rpc_utils_init = PacketBuilder::<64>::new().init(0x01, "rpc_utils");
-        self.send_packet(rpc_utils_init.as_slice()).await?;
+        let bt_rpc_init_packet = packet::NrfRpcPacket::<'_, packet::Init>::new(
+            self.bt_rpc_group_id,
+            0xFF,
+            bt_rpc_init_packet_payload,
+        );
 
-        let mut response_buf = [0u8; 256];
+        self.send_packet(bt_rpc_init_packet).await?;
 
-        let len = self.receive_packet(&mut response_buf).await?;
-        if len >= 5 && response_buf[0] == 0x04 {
-            self.bt_rpc_group_id = response_buf[4];
-        }
+        let bt_rpc_init_packet_payload = packet::InitPacketPayload::new(
+            &mut buffer,
+            NRF_RPC_PROTOCOL_VERSION,
+            NRF_RPC_PROTOCOL_VERSION,
+            "rpc_utils",
+        )
+        .expect("Failed to build bt_rpc init packet");
 
-        let len = self.receive_packet(&mut response_buf).await?;
-        if len >= 5 && response_buf[0] == 0x04 {
-            self.rpc_utils_group_id = response_buf[4];
-        }
-        */
-        Ok(())
+        let bt_rpc_init_packet = packet::NrfRpcPacket::<'_, packet::Init>::new(
+            self.rpc_utils_group_id,
+            0xFF,
+            bt_rpc_init_packet_payload,
+        );
+
+        self.send_packet(bt_rpc_init_packet).await
     }
 
     // Accessor methods for internal use by command modules
@@ -117,18 +144,19 @@ impl<T: AsyncTransport> RpcClient<T> {
         &mut self,
         packet: NrfRpcPacket<'a, P>,
     ) -> Result<(), RpcError> {
-        let mut buf = RpcTransportBuffer::<256> {
-            buffer: [0u8; 256],
-            pos: 0,
-        };
+        let mut buffer = [0u8; 256];
+        let mut rpc_transport_buf = RpcTransportBuffer::new(&mut buffer);
+
         packet
-            .write_into(&mut buf)
+            .write_into(&mut rpc_transport_buf)
             .map_err(|_| RpcError::InvalidResponse)?;
 
         self.transport
-            .write(&buf.buffer[..buf.pos])
+            .write(rpc_transport_buf.into())
             .await
             .map_err(|_| RpcError::Transport)?;
+
+        // (todo) error handling
         Ok(())
     }
 

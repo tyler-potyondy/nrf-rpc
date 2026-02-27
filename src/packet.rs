@@ -24,7 +24,7 @@ const COMMAND_PACKET_TYPE_BASE: u8 = 0x80;
 
 /// Command ID field value indicating that the field is unused
 /// (e.g., for response and init packets).
-const COMMAND_ID_FIELD_UNUSED: u8 = 0xFF;
+const COMMAND_ID_FIELD_UNUSED: u8 = 0x0;
 
 /// nRF RPC packet format
 ///
@@ -78,7 +78,8 @@ const COMMAND_ID_FIELD_UNUSED: u8 = 0xFF;
 /// Identifies an individual command or event within an nRF RPC group.
 ///
 /// If the packet is a response or an initialization packet, this field has no meaning
-/// and shall be set to 0xff.
+/// and shall be set to 0xff. **NOTE: This is copied from the docs, but it appears that
+/// in practice, the Command ID field is set to 0x00 for resp/init packets.**
 ///
 /// Destination Context ID: 8 bits
 /// ==============================
@@ -263,35 +264,34 @@ impl<'a, C: CommandId> NrfRpcPacket<'a, Command<C>> {
     }
 }
 
-struct InitPacketPayload<'a, const N: usize> {
+pub struct InitPacketPayload<'a, const N: usize> {
     data: &'a mut [u8; N],
+    pos: usize,
 }
 
 impl<'a, const N: usize> InitPacketPayload<'a, N> {
-    pub fn new(buffer: &'a mut [u8; N]) -> Self {
-        Self { data: buffer }
-    }
-
-    pub fn set_version(&mut self, max_version: u8, min_version: u8) {
-        self.data[0] = (max_version & 0x0F) | ((min_version & 0x0F) << 4);
-    }
-
-    pub fn set_group_name(&mut self, group_name: &str) -> Result<(), ()> {
-        let name_bytes = group_name.as_bytes();
-        if name_bytes.len() > self.data.len() - 1 {
-            return Err(()); // Not enough space for group name
+    pub fn new(
+        buffer: &'a mut [u8; N],
+        max_version: u8,
+        min_version: u8,
+        group_name: &str,
+    ) -> Result<Self, ()> {
+        if group_name.as_bytes().len() > N - 1 {
+            return Err(()); // Not enough space for version and group name
         }
 
-        // (todo) this panic path should not be reached due to above check,
-        // but it would be better to statically guarantee this.
-        self.data[1..1 + name_bytes.len()].copy_from_slice(name_bytes);
-        Ok(())
+        buffer[0] = (max_version & 0x0F) | ((min_version & 0x0F) << 4);
+        buffer[1..1 + group_name.as_bytes().len()].copy_from_slice(group_name.as_bytes());
+        Ok(Self {
+            data: buffer,
+            pos: 1 + group_name.as_bytes().len(),
+        })
     }
 }
 
 impl<'a, const N: usize> Into<&'a [u8]> for InitPacketPayload<'a, N> {
     fn into(self) -> &'a [u8] {
-        &self.data[..]
+        &self.data[..self.pos]
     }
 }
 
@@ -301,7 +301,7 @@ impl<'a> NrfRpcPacket<'a, Init> {
     // Max Version: bits 0-3 (byte 0)
     // Min Version: bits 4-7 (byte 0)
     // Group name: byte 1 to N
-    fn new<const N: usize>(
+    pub fn new<const N: usize>(
         src_group_id: u8,
         dst_group_id: u8,
         init_payload: InitPacketPayload<'a, N>,
@@ -332,10 +332,7 @@ impl<'a, P: NrfRpcPacketType> NrfRpcPacket<'a, P> {
 
     /// Provided an RpcTransportBuffer, copy the formed nrf rpc packet into the
     /// buffer. Returns Result<(), ErrorCode>.
-    pub fn write_into<const N: usize>(
-        &self,
-        buf: &mut crate::RpcTransportBuffer<N>,
-    ) -> Result<(), ()> {
+    pub fn write_into(&self, buf: &mut crate::RpcTransportBuffer<'_>) -> Result<(), ()> {
         // (todo) error code update to not be `()`
         // (todo) this requires copying. I would rather this be zero copy,
         // but alas...we could pretty easily do some unsafe shenanigans
