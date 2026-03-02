@@ -5,6 +5,7 @@ extern crate std;
 
 pub mod ble;
 mod cbor_encoding;
+mod decoding;
 #[doc(hidden)]
 pub mod packet;
 mod transport;
@@ -14,7 +15,7 @@ pub use transport::{AsyncTransport, TransportError};
 
 use cbor_encoding::CborError;
 
-use crate::packet::NrfRpcPacket;
+use crate::packet::{DstGroupId, MaxVersion, MinVersion, NrfRpcPacket, SrcGroupId};
 
 /// RPC client errors
 #[derive(Debug)]
@@ -25,7 +26,9 @@ pub enum RpcError {
     Timeout,
 }
 
-const NRF_RPC_PROTOCOL_VERSION: u8 = 0;
+const NRF_RPC_PROTOCOL_VERSION_MIN: MinVersion = MinVersion::new(0);
+
+const NRF_RPC_PROTOCOL_VERSION_MAX: MaxVersion = MaxVersion::new(0);
 
 impl core::fmt::Display for RpcError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -100,15 +103,24 @@ impl<T: AsyncTransport> RpcClient<T> {
         let mut buffer = [0u8; 64];
         let bt_rpc_init_packet_payload = packet::InitPacketPayload::new(
             &mut buffer,
-            NRF_RPC_PROTOCOL_VERSION,
-            NRF_RPC_PROTOCOL_VERSION,
+            NRF_RPC_PROTOCOL_VERSION_MAX,
+            NRF_RPC_PROTOCOL_VERSION_MIN,
             "bt_rpc",
         )
         .expect("Failed to build bt_rpc init packet");
 
+        let unspecified_dst_group_id =
+            DstGroupId::try_from(0xFF).expect("Invalid destination group ID");
+
+        let bt_rpc_group_id =
+            SrcGroupId::try_from(self.bt_rpc_group_id).expect("Invalid source group ID");
+
+        let rpc_utils_group_id =
+            SrcGroupId::try_from(self.rpc_utils_group_id).expect("Invalid source group ID");
+
         let bt_rpc_init_packet = packet::NrfRpcPacket::<'_, packet::Init>::new(
-            self.bt_rpc_group_id,
-            0xFF,
+            bt_rpc_group_id,
+            unspecified_dst_group_id,
             bt_rpc_init_packet_payload,
         );
 
@@ -116,15 +128,15 @@ impl<T: AsyncTransport> RpcClient<T> {
 
         let bt_rpc_init_packet_payload = packet::InitPacketPayload::new(
             &mut buffer,
-            NRF_RPC_PROTOCOL_VERSION,
-            NRF_RPC_PROTOCOL_VERSION,
+            NRF_RPC_PROTOCOL_VERSION_MAX,
+            NRF_RPC_PROTOCOL_VERSION_MIN,
             "rpc_utils",
         )
         .expect("Failed to build bt_rpc init packet");
 
         let bt_rpc_init_packet = packet::NrfRpcPacket::<'_, packet::Init>::new(
-            self.rpc_utils_group_id,
-            0xFF,
+            rpc_utils_group_id,
+            unspecified_dst_group_id,
             bt_rpc_init_packet_payload,
         );
 

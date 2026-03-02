@@ -21,7 +21,9 @@
 //! ```
 
 use crate::cbor_encoding::{CborError, CborPayloadBuilder};
-use crate::packet::{self, CommandId, NrfRpcPacket};
+use crate::packet::{
+    self, CommandId, DestContextId, DstGroupId, NrfRpcPacket, SrcContextId, SrcGroupId,
+};
 use crate::{AsyncTransport, RpcClient, RpcError};
 
 const BT_RPC_GROUP_ID: u8 = 0x0;
@@ -31,8 +33,7 @@ const RPC_UTILS_GROUP_ID: u8 = 0x1;
 // Ble Struct
 // ============================================================================
 
-#[repr(C)]
-#[derive(code_gen_helpers::CommandId)]
+#[repr(u8)]
 enum BleCommandId {
     /* bluetooth.h API */
     BtRpcGetCheckListRpcCmd,
@@ -192,7 +193,14 @@ impl<T: AsyncTransport> Ble<T> {
         let cbor_args = CborPayloadBuilder::new(&mut buffer); // No arguments for bt_enable
         let payload = cbor_args.build().map_err(|_| BleError::InvalidParameter)?;
 
-        let packet = NrfRpcPacket::<packet::Command<BtEnableRpcCmd>>::new(0, 0, 0, 0, payload);
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(0).expect("Invalid source context ID"),
+            DestContextId::try_from(0).expect("Invalid destination context ID"),
+            CommandId::try_from(BleCommandId::BtEnableRpcCmd as u8).expect("Invalid command ID"),
+            SrcGroupId::try_from(0).expect("Invalid source group ID"),
+            DstGroupId::try_from(0).expect("Invalid destination group ID"),
+            payload,
+        );
         self.client
             .send_packet(packet)
             .await

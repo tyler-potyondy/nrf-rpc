@@ -188,6 +188,13 @@ impl<'a> Into<&'a [u8]> for CBorPayload<'a> {
     }
 }
 
+impl<'a> TryFrom<&'a mut [u8]> for CBorPayload<'a> {
+    type Error = ();
+    fn try_from(value: &'a mut [u8]) -> Result<Self, Self::Error> {
+        Ok(Self(value))
+    }
+}
+
 pub struct CborPayloadBuilder<'a> {
     buffer: &'a mut [u8],
     pos: usize,

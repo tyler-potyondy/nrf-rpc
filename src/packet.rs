@@ -22,10 +22,6 @@ const ERROR_REPORT_PACKET_TYPE: u8 = 0x03;
 const INIT_PACKET_TYPE: u8 = 0x04;
 const COMMAND_PACKET_TYPE_BASE: u8 = 0x80;
 
-/// Command ID field value indicating that the field is unused
-/// (e.g., for response and init packets).
-const COMMAND_ID_FIELD_UNUSED: u8 = 0x0;
-
 /// nRF RPC packet format
 ///
 /// Each nRF RPC packet consists of a 5-byte header and an optional, variable-length payload:
@@ -150,24 +146,104 @@ const COMMAND_ID_FIELD_UNUSED: u8 = 0x0;
 ///       63 62 61 72: CBOR text string ("bar")
 ///       f6: CBOR null
 pub struct NrfRpcPacket<'a, T: NrfRpcPacketType> {
-    src_context_id: Option<u8>, // Only set for command packets
-    dst_context_id: u8,
-    src_group_id: u8,
-    dst_group_id: u8,
+    src_context_id: Option<SrcContextId>, // Only set for command packets
+    dst_context_id: DestContextId,
+    command_id: CommandId,
+    src_group_id: SrcGroupId,
+    dst_group_id: DstGroupId,
     payload: &'a [u8],
     associated_packet_type: PhantomData<T>,
 }
 
-impl<'a, C: CommandId> NrfRpcPacket<'a, Event<C>> {
-    fn new(
-        dst_context_id: u8,
-        src_group_id: u8,
-        dst_group_id: u8,
+pub struct DestContextId(u8);
+
+impl TryFrom<u8> for DestContextId {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(Self(value))
+    }
+}
+
+impl Into<u8> for DestContextId {
+    fn into(self) -> u8 {
+        self.0
+    }
+}
+
+pub struct SrcGroupId(u8);
+
+impl TryFrom<u8> for SrcGroupId {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(Self(value))
+    }
+}
+
+impl Into<u8> for SrcGroupId {
+    fn into(self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct DstGroupId(u8);
+
+impl TryFrom<u8> for DstGroupId {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(Self(value))
+    }
+}
+
+impl Into<u8> for DstGroupId {
+    fn into(self) -> u8 {
+        self.0
+    }
+}
+
+pub struct CommandId(u8);
+
+impl TryFrom<u8> for CommandId {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(Self(value))
+    }
+}
+
+impl Into<u8> for CommandId {
+    fn into(self) -> u8 {
+        self.0
+    }
+}
+
+pub struct SrcContextId(u8);
+const COMMAND_ID_FIELD_UNUSED: CommandId = CommandId(0x0);
+
+impl TryFrom<u8> for SrcContextId {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(Self(value))
+    }
+}
+
+impl Into<u8> for SrcContextId {
+    fn into(self) -> u8 {
+        self.0
+    }
+}
+
+impl<'a> NrfRpcPacket<'a, Event> {
+    pub fn new(
+        dst_context_id: DestContextId,
+        src_group_id: SrcGroupId,
+        dst_group_id: DstGroupId,
+        command_id: CommandId,
         cbor_encoded_payload: CBorPayload<'a>,
     ) -> Self {
         Self {
             src_context_id: None,
             dst_context_id,
+            command_id,
             src_group_id,
             dst_group_id,
             payload: cbor_encoded_payload.into(),
@@ -176,16 +252,17 @@ impl<'a, C: CommandId> NrfRpcPacket<'a, Event<C>> {
     }
 }
 
-impl<'a, C: CommandId> NrfRpcPacket<'a, Response<C>> {
-    fn new(
-        dst_context_id: u8,
-        src_group_id: u8,
-        dst_group_id: u8,
+impl<'a> NrfRpcPacket<'a, Response> {
+    pub fn new(
+        dst_context_id: DestContextId,
+        src_group_id: SrcGroupId,
+        dst_group_id: DstGroupId,
         cbor_encoded_payload: CBorPayload<'a>,
     ) -> Self {
         Self {
             src_context_id: None,
             dst_context_id,
+            command_id: COMMAND_ID_FIELD_UNUSED,
             src_group_id,
             dst_group_id,
             payload: cbor_encoded_payload.into(),
@@ -194,11 +271,17 @@ impl<'a, C: CommandId> NrfRpcPacket<'a, Response<C>> {
     }
 }
 
-impl<'a, C: CommandId> NrfRpcPacket<'a, EventAck<C>> {
-    fn new(dst_context_id: u8, src_group_id: u8, dst_group_id: u8) -> Self {
+impl<'a> NrfRpcPacket<'a, EventAck> {
+    pub fn new(
+        dst_context_id: DestContextId,
+        src_group_id: SrcGroupId,
+        dst_group_id: DstGroupId,
+        command_id: CommandId,
+    ) -> Self {
         Self {
             src_context_id: None,
-            dst_context_id,
+            dst_context_id: dst_context_id,
+            command_id,
             src_group_id,
             dst_group_id,
             payload: &[],
@@ -228,15 +311,17 @@ impl<'a> Into<&'a [u8]> for NrfRpcErrorCode<'a> {
 impl<'a> NrfRpcPacket<'a, ErrorReport> {
     // Error report: the payload is a 32-bit integer representing an error code, in
     // little-endian byte order.
-    fn new(
-        dst_context_id: u8,
-        src_group_id: u8,
-        dst_group_id: u8,
+    pub fn new(
+        dst_context_id: DestContextId,
+        src_group_id: SrcGroupId,
+        dst_group_id: DstGroupId,
+        command_id: CommandId,
         error_code: NrfRpcErrorCode<'a>,
     ) -> Self {
         Self {
             src_context_id: None,
             dst_context_id,
+            command_id,
             src_group_id,
             dst_group_id,
             payload: error_code.into(),
@@ -245,17 +330,19 @@ impl<'a> NrfRpcPacket<'a, ErrorReport> {
     }
 }
 
-impl<'a, C: CommandId> NrfRpcPacket<'a, Command<C>> {
+impl<'a> NrfRpcPacket<'a, Command> {
     pub fn new(
-        src_context_id: u8,
-        dst_context_id: u8,
-        src_group_id: u8,
-        dst_group_id: u8,
+        src_context_id: SrcContextId,
+        dst_context_id: DestContextId,
+        command_id: CommandId,
+        src_group_id: SrcGroupId,
+        dst_group_id: DstGroupId,
         payload: CBorPayload<'a>,
     ) -> Self {
         Self {
             src_context_id: Some(src_context_id),
             dst_context_id,
+            command_id,
             src_group_id,
             dst_group_id,
             payload: payload.into(),
@@ -269,18 +356,58 @@ pub struct InitPacketPayload<'a, const N: usize> {
     pos: usize,
 }
 
+pub struct MaxVersion(u8);
+impl MaxVersion {
+    pub const fn new(value: u8) -> Self {
+        Self(value)
+    }
+}
+
+impl From<MaxVersion> for u8 {
+    fn from(value: MaxVersion) -> Self {
+        value.0
+    }
+}
+
+impl TryFrom<u8> for MaxVersion {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(Self(value))
+    }
+}
+
+pub struct MinVersion(u8);
+impl MinVersion {
+    pub const fn new(value: u8) -> Self {
+        Self(value)
+    }
+}
+
+impl From<MinVersion> for u8 {
+    fn from(value: MinVersion) -> Self {
+        value.0
+    }
+}
+
+impl TryFrom<u8> for MinVersion {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(Self(value))
+    }
+}
+
 impl<'a, const N: usize> InitPacketPayload<'a, N> {
     pub fn new(
         buffer: &'a mut [u8; N],
-        max_version: u8,
-        min_version: u8,
+        max_version: MaxVersion,
+        min_version: MinVersion,
         group_name: &str,
     ) -> Result<Self, ()> {
         if group_name.as_bytes().len() > N - 1 {
             return Err(()); // Not enough space for version and group name
         }
 
-        buffer[0] = (max_version & 0x0F) | ((min_version & 0x0F) << 4);
+        buffer[0] = (u8::from(max_version) & 0x0F) | ((u8::from(min_version) & 0x0F) << 4);
         buffer[1..1 + group_name.as_bytes().len()].copy_from_slice(group_name.as_bytes());
         Ok(Self {
             data: buffer,
@@ -289,9 +416,9 @@ impl<'a, const N: usize> InitPacketPayload<'a, N> {
     }
 }
 
-impl<'a, const N: usize> Into<&'a [u8]> for InitPacketPayload<'a, N> {
-    fn into(self) -> &'a [u8] {
-        &self.data[..self.pos]
+impl<'a, const N: usize> From<InitPacketPayload<'a, N>> for &'a [u8] {
+    fn from(value: InitPacketPayload<'a, N>) -> Self {
+        &value.data[..value.pos]
     }
 }
 
@@ -302,13 +429,14 @@ impl<'a> NrfRpcPacket<'a, Init> {
     // Min Version: bits 4-7 (byte 0)
     // Group name: byte 1 to N
     pub fn new<const N: usize>(
-        src_group_id: u8,
-        dst_group_id: u8,
+        src_group_id: SrcGroupId,
+        dst_group_id: DstGroupId,
         init_payload: InitPacketPayload<'a, N>,
     ) -> Self {
         Self {
             src_context_id: None,
-            dst_context_id: 0xFF, // Unknown destination context ID for init packets
+            dst_context_id: DestContextId(0xFF), // Unknown destination context ID for init packets
+            command_id: COMMAND_ID_FIELD_UNUSED,
             src_group_id,
             dst_group_id,
             payload: init_payload.into(),
@@ -318,21 +446,23 @@ impl<'a> NrfRpcPacket<'a, Init> {
 }
 
 impl<'a, P: NrfRpcPacketType> NrfRpcPacket<'a, P> {
-    fn form_header(&self) -> [u8; 5] {
-        let type_byte = P::TypeField | self.src_context_id.unwrap_or(0);
-        let command_id_byte = P::CommandIdField;
-        [
+    fn form_packet(self) -> ([u8; 5], &'a [u8]) {
+        let type_byte = P::PACKET_TYPE as u8
+            | <SrcContextId as Into<u8>>::into(self.src_context_id.unwrap_or(SrcContextId(0)));
+        let command_id_byte = self.command_id.into();
+        let header = [
             type_byte,
             command_id_byte,
-            self.dst_context_id,
-            self.src_group_id,
-            self.dst_group_id,
-        ]
+            self.dst_context_id.into(),
+            self.src_group_id.into(),
+            self.dst_group_id.into(),
+        ];
+        (header, self.payload)
     }
 
     /// Provided an RpcTransportBuffer, copy the formed nrf rpc packet into the
     /// buffer. Returns Result<(), ErrorCode>.
-    pub fn write_into(&self, buf: &mut crate::RpcTransportBuffer<'_>) -> Result<(), ()> {
+    pub fn write_into(self, buf: &mut crate::RpcTransportBuffer<'_>) -> Result<(), ()> {
         // (todo) error code update to not be `()`
         // (todo) this requires copying. I would rather this be zero copy,
         // but alas...we could pretty easily do some unsafe shenanigans
@@ -342,54 +472,59 @@ impl<'a, P: NrfRpcPacketType> NrfRpcPacket<'a, P> {
         }
 
         // (todo) it would be nice to avoid this panic path.
-        let header = self.form_header();
+        let (header, payload) = self.form_packet();
         buf.write_into_or_err(&header)?;
-        buf.write_into_or_err(self.payload)?;
+        buf.write_into_or_err(payload)?;
         Ok(())
     }
 }
 
-pub trait CommandId {
-    const COMMAND_ID: u8;
-}
-
 pub trait NrfRpcPacketType {
-    const TypeField: u8;
-    const CommandIdField: u8;
+    const PACKET_TYPE: TypeField;
 }
 
-pub struct Event<C: CommandId>(PhantomData<C>);
-impl<C: CommandId> NrfRpcPacketType for Event<C> {
-    const CommandIdField: u8 = C::COMMAND_ID;
-    const TypeField: u8 = 0x00;
+pub enum TypeField {
+    Event = 0x00,
+    Response = 0x01,
+    EventAck = 0x02,
+    ErrorReport = 0x03,
+    Init = 0x04,
+    Command = 0x80,
 }
 
-pub struct Response<C: CommandId>(PhantomData<C>);
-impl<C: CommandId> NrfRpcPacketType for Response<C> {
-    const CommandIdField: u8 = C::COMMAND_ID;
-    const TypeField: u8 = RESPONSE_PACKET_TYPE;
+impl TryFrom<u8> for TypeField {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        unimplemented!()
+    }
 }
 
-pub struct EventAck<C: CommandId>(PhantomData<C>);
-impl<C: CommandId> NrfRpcPacketType for EventAck<C> {
-    const CommandIdField: u8 = C::COMMAND_ID;
-    const TypeField: u8 = EVENT_ACK_PACKET_TYPE;
+pub struct Event;
+impl NrfRpcPacketType for Event {
+    const PACKET_TYPE: TypeField = TypeField::Event;
+}
+
+pub struct Response;
+impl NrfRpcPacketType for Response {
+    const PACKET_TYPE: TypeField = TypeField::Response;
+}
+
+pub struct EventAck;
+impl NrfRpcPacketType for EventAck {
+    const PACKET_TYPE: TypeField = TypeField::EventAck;
 }
 
 pub struct ErrorReport;
 impl NrfRpcPacketType for ErrorReport {
-    const CommandIdField: u8 = unimplemented!();
-    const TypeField: u8 = ERROR_REPORT_PACKET_TYPE;
+    const PACKET_TYPE: TypeField = TypeField::ErrorReport;
 }
 
 pub struct Init;
 impl NrfRpcPacketType for Init {
-    const CommandIdField: u8 = COMMAND_ID_FIELD_UNUSED;
-    const TypeField: u8 = INIT_PACKET_TYPE;
+    const PACKET_TYPE: TypeField = TypeField::Init;
 }
 
-pub struct Command<C: CommandId>(PhantomData<C>);
-impl<C: CommandId> NrfRpcPacketType for Command<C> {
-    const CommandIdField: u8 = C::COMMAND_ID;
-    const TypeField: u8 = COMMAND_PACKET_TYPE_BASE;
+pub struct Command;
+impl NrfRpcPacketType for Command {
+    const PACKET_TYPE: TypeField = TypeField::Command;
 }
