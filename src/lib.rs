@@ -10,6 +10,8 @@ mod decoding;
 pub mod packet;
 mod transport;
 mod uart_transport;
+pub use uart_transport::NrfRpcUartTransport;
+pub use uart_transport::UartTransport;
 
 pub use transport::{AsyncTransport, TransportError};
 
@@ -52,9 +54,9 @@ pub struct RpcTransportBuffer<'a> {
     pos: usize,
 }
 
-impl<'a> Into<&'a [u8]> for RpcTransportBuffer<'a> {
-    fn into(self) -> &'a [u8] {
-        &self.buffer[..self.pos]
+impl<'a> From<RpcTransportBuffer<'a>> for &'a [u8] {
+    fn from(value: RpcTransportBuffer<'a>) -> Self {
+        &value.buffer[..value.pos]
     }
 }
 
@@ -67,12 +69,21 @@ impl<'a> RpcTransportBuffer<'a> {
         self.buffer.len() - self.pos
     }
 
-    pub fn write_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
+    pub fn write_slice_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
         if self.pos + data.len() > self.buffer.len() {
             return Err(());
         }
         self.buffer[self.pos..self.pos + data.len()].copy_from_slice(data);
         self.pos += data.len();
+        Ok(())
+    }
+
+    pub fn write_byte_into_or_err(&mut self, data: u8) -> Result<(), ()> {
+        if self.pos + 1 > self.buffer.len() {
+            return Err(());
+        }
+        self.buffer[self.pos] = data;
+        self.pos += 1;
         Ok(())
     }
 }
@@ -81,7 +92,7 @@ impl<'a> RpcTransportBuffer<'a> {
 ///
 /// Generic over a transport. The transport can be any implementation
 /// of the AsyncTransport trait (e.g., UART, IPC, USB).
-pub(crate) struct RpcClient<T: AsyncTransport> {
+pub struct RpcClient<T: AsyncTransport> {
     transport: T,
     bt_rpc_group_id: u8,
     rpc_utils_group_id: u8,

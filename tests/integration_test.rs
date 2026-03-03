@@ -7,11 +7,11 @@
 //! rx/tx to a unix socket. The test here then provides a mock transport layer that
 //! directs client writes to this socket and polls for responses on the socket.
 
-use nrf_rpc::{AsyncTransport, TransportError};
-use std::collections::HashSet;
-use std::io::{BufRead, Read};
+use nrf_rpc::{AsyncTransport, NrfRpcUartTransport, RpcClient, TransportError, UartTransport};
+use std::io::{BufRead, Write};
+use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
-
+use std::time::{Duration, Instant};
 /// Mock error type
 #[derive(Debug)]
 struct MockError;
@@ -24,16 +24,48 @@ impl core::fmt::Display for MockError {
 
 impl TransportError for MockError {}
 
-/// Mock UART transport that records all written packets
-#[derive(Clone)]
+/// Mock UART transport that records all written packets and forwards them to
+/// the Zephyr server via the socat UNIX socket.
 struct MockUart {
+    socat_socket_path: String,
     sent_packets: Arc<Mutex<Vec<Vec<u8>>>>,
+    socket: UnixStream,
 }
 
 impl MockUart {
     fn new() -> Self {
+        let socat_socket_path = SOCAT_SOCKET_PATH.to_string();
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+        let mut last_err: Option<std::io::Error> = None;
+
+        // Retry connecting for a short period to give socat time to start
+        // listening on the UNIX socket.
+        let socket = loop {
+            match UnixStream::connect(&socat_socket_path) {
+                Ok(s) => break s,
+                Err(e) => {
+                    last_err = Some(e);
+                    if start.elapsed() >= timeout {
+                        panic!(
+                            "Failed to connect to socat UNIX socket {} within {:?}: {:?}",
+                            socat_socket_path, timeout, last_err
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        };
+
+        // Ensure blocking mode so writes complete before our minimal executor polls again.
+        socket
+            .set_nonblocking(false)
+            .expect("Failed to configure socat UNIX socket");
+
         Self {
+            socat_socket_path,
             sent_packets: Arc::new(Mutex::new(Vec::new())),
+            socket,
         }
     }
 
@@ -46,13 +78,41 @@ impl MockUart {
     }
 }
 
-impl AsyncTransport for MockUart {
+impl UartTransport for MockUart {
     type Error = MockError;
 
     async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         // Log the packet being sent
-        println!("MockUart: Sending {} bytes: {:02X?}", data.len(), data);
+        println!(
+            "MockUart: Sending {} bytes to {}: {:02X?}",
+            data.len(),
+            self.socat_socket_path,
+            data
+        );
+
+        // Record locally for inspection by tests if needed
         self.sent_packets.lock().unwrap().push(data.to_vec());
+
+        // Forward the bytes to the socat UNIX socket so that the Zephyr UART
+        // endpoint actually receives the frame.
+        if let Err(e) = self.socket.write_all(data) {
+            println!(
+                "MockUart: Failed to write {} bytes to socat socket {}: {}",
+                data.len(),
+                self.socat_socket_path,
+                e
+            );
+            return Err(MockError);
+        }
+
+        if let Err(e) = self.socket.flush() {
+            println!(
+                "MockUart: Failed to flush socat socket {}: {}",
+                self.socat_socket_path, e
+            );
+            return Err(MockError);
+        }
+
         Ok(data.len())
     }
 
@@ -109,13 +169,14 @@ fn block_on<F: core::future::Future>(mut f: F) -> F::Output {
 
 const ZEPHY_RPC_SERVER_RUN_SCRIPT: &str = "run_bsim.sh";
 const TEST_DIRECTORY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/");
+const SOCAT_SOCKET_PATH: &str = "/tmp/nrf_rpc_socket";
 
 use std::io::BufReader;
-use std::time::{Duration, Instant};
 pub mod TestProcessInfra {
     use std::{
         io::{BufReader, Lines},
         process::ChildStdout,
+        time::{Duration, Instant},
     };
 
     type ZephyrServerProcess = std::process::Child;
@@ -140,12 +201,16 @@ pub mod TestProcessInfra {
             }
         }
 
-        /// Blocking call to get the next line of stdout from the RPC server process.
-        pub fn get_rpc_server_stdout_line(&mut self) -> String {
-            self.rpc_server_stdout
-                .next()
-                .expect("Failed to read stdout")
-                .expect("Failed to read stdout")
+        /// Call to get the next line of stdout from the RPC server process,
+        /// blocking for specified duration, and then returning None if no line is available.
+        pub fn get_rpc_server_stdout_line(&mut self, timeout: Duration) -> Option<String> {
+            let start = Instant::now();
+            while Instant::now() - start < timeout {
+                if let Some(line) = self.rpc_server_stdout.next() {
+                    return Some(line.expect("Failed to read stdout"));
+                }
+            }
+            None
         }
 
         fn kill(&mut self) {
@@ -215,15 +280,36 @@ fn run_zephyr_rpc_server_exe() -> TestProcesses {
         }
     };
 
-    let socat = create_socat_socket(&interface, "/tmp/nrf_rpc_socket");
+    let socat = create_socat_socket(&interface, SOCAT_SOCKET_PATH);
     TestProcesses::new(rpc_server, lines, socat)
 }
 
 fn create_socat_socket(pty_port: &str, socket_path: &str) -> std::process::Child {
     use std::process::Command;
+    use std::{fs, io};
+
+    // Remove any stale socket file from a previous test run. If the file does
+    // not exist, ignore the error.
+    match fs::remove_file(socket_path) {
+        Ok(_) => {
+            println!("Removed existing socat socket at {}", socket_path);
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            panic!(
+                "Failed to remove existing socat socket at {}: {}",
+                socket_path, e
+            );
+        }
+    }
+
     Command::new("socat")
+        // Listen on the UNIX socket and forward to the existing Zephyr PTY.
+        // The PTY path we get from the server log (e.g. /dev/pts/4) is an
+        // already-existing device, so we use FILE: instead of creating a new
+        // PTY with link=.
         .arg(format!("UNIX-LISTEN:{},fork", socket_path))
-        .arg(format!("PTY,link={},raw,echo=0", pty_port))
+        .arg(format!("FILE:{},raw,echo=0", pty_port))
         .spawn()
         .expect("Failed to start socat")
 }
@@ -245,18 +331,18 @@ fn test_zephyr_rpc_server() {
     let start = Instant::now();
     let mut expected_index = 0;
 
-    // (todo) test might hang if server doesn't have an output since
-    // reader is blocking.
-    while Instant::now() - start < Duration::from_secs(TEST_DURATION) {
+    // Read 500 lines of stdout from the server, looking for the expected outputs.
+    for _ in 0..500 {
         if expected_index >= expected.len() {
             println!("Found all expected outputs!");
             return; // Test passed
         }
 
-        // Read from stdout and see if we find any of the expected outputs.
-        let line = processes.get_rpc_server_stdout_line();
-        if expected_index < expected.len() && line.contains(expected[expected_index]) {
-            expected_index += 1;
+        let line = processes.get_rpc_server_stdout_line(Duration::from_millis(500));
+        if let Some(line) = line {
+            if expected_index < expected.len() && line.contains(expected[expected_index]) {
+                expected_index += 1;
+            }
         }
     }
 
@@ -265,6 +351,34 @@ fn test_zephyr_rpc_server() {
         expected_index,
         expected.len()
     );
+}
+
+#[test]
+/// Test the client can send a packet and receive an ACK.
+fn test_client_can_send_packet() {
+    println!("Starting client can send packet test...");
+
+    let mut processes = run_zephyr_rpc_server_exe();
+
+    // Wait for the server to start.
+    std::thread::sleep(Duration::from_secs(5));
+
+    println!("Starting client...");
+    let mut uart = MockUart::new();
+    let transport = NrfRpcUartTransport::new(&mut uart);
+    let mut client: RpcClient<NrfRpcUartTransport<'_, MockUart>> = RpcClient::new(transport);
+    block_on(client.init()).expect("Failed to initialize client");
+
+    // Client has transmitted, let's check that the server received the packet.
+    // Print the server's stdout.
+    for _ in 0..50 {
+        let line = processes.get_rpc_server_stdout_line(Duration::from_millis(5));
+        if let Some(line) = line {
+            println!("{}", line);
+        }
+    }
+
+    panic!("Test failed");
 }
 
 /*

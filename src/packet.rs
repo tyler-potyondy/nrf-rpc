@@ -473,8 +473,8 @@ impl<'a, P: NrfRpcPacketType> NrfRpcPacket<'a, P> {
 
         // (todo) it would be nice to avoid this panic path.
         let (header, payload) = self.form_packet();
-        buf.write_into_or_err(&header)?;
-        buf.write_into_or_err(payload)?;
+        buf.write_slice_into_or_err(&header)?;
+        buf.write_slice_into_or_err(payload)?;
         Ok(())
     }
 }

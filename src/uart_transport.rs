@@ -4,6 +4,8 @@
 //! procedures on a remote processor that is connected with the local processor using
 //! the UART interface.
 
+use crate::{AsyncTransport, RpcTransportBuffer, TransportError};
+
 /// nRF RPC UART Escape Byte.
 const ESCAPE: u8 = 0x7d;
 /// nRF RPC UART Frame Delimiter Byte.
@@ -79,4 +81,92 @@ const DELIMITER: u8 = 0x7e;
 // struct UartFrame<const N: usize, M: Mode> {
 //     base_frame: [u8; N],
 // }
-struct todo {}
+pub struct NrfRpcUartTransport<'a, U: UartTransport> {
+    uart: &'a mut U,
+}
+
+/// Calculate CRC16_CCITT with initial value 0xffff.
+fn crc16_ccitt(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xffff;
+
+    for &byte in data {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            if (crc & 0x8000) != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+
+    crc
+}
+
+impl<'a, U: UartTransport> NrfRpcUartTransport<'a, U> {
+    pub fn new(uart: &'a mut U) -> Self {
+        Self { uart }
+    }
+
+    /// Write a single byte into the frame, applying UART escape rules.
+    fn write_escaped_byte(&self, buffer: &mut RpcTransportBuffer, byte: u8) -> Result<(), ()> {
+        if byte == ESCAPE || byte == DELIMITER {
+            buffer.write_byte_into_or_err(ESCAPE)?;
+            buffer.write_byte_into_or_err(byte ^ 0x20)
+        } else {
+            buffer.write_byte_into_or_err(byte)
+        }
+    }
+
+    fn encode_uart_frame(
+        &mut self,
+        data: &[u8],
+        buffer: &mut RpcTransportBuffer,
+    ) -> Result<(), ()> {
+        // Add deliminter byte.
+        buffer.write_byte_into_or_err(DELIMITER)?;
+
+        // Add copy data bytes into buffer, checking for special bytes (escape, delimiter).
+        // If find a special byte, add the escape byte and the XORed byte.
+        for byte in data {
+            self.write_escaped_byte(buffer, *byte)?;
+        }
+
+        // Add checksum bytes.
+        let checksum = crc16_ccitt(data).to_le_bytes();
+        self.write_escaped_byte(buffer, checksum[0])?;
+        self.write_escaped_byte(buffer, checksum[1])?;
+
+        // Add deliminter byte.
+        buffer.write_byte_into_or_err(DELIMITER)?;
+
+        Ok(())
+    }
+}
+
+impl<'a, U: UartTransport> AsyncTransport for NrfRpcUartTransport<'a, U> {
+    type Error = U::Error;
+
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+        let mut base_buffer = [0; 200];
+        let mut buffer = RpcTransportBuffer::new(&mut base_buffer);
+
+        // Encode UartFrame, then write over Uart.
+        self.encode_uart_frame(data, &mut buffer)
+            .expect("Failed to encode UART frame");
+        self.uart.write(buffer.into()).await
+    }
+
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
+        // Read from Uart, then decode UartFrame.
+        self.uart.read(buffer).await
+    }
+}
+
+pub trait UartTransport {
+    type Error: TransportError;
+
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error>;
+
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error>;
+}
