@@ -86,16 +86,20 @@ pub struct NrfRpcUartTransport<'a, U: UartTransport> {
 }
 
 /// Calculate CRC16_CCITT with initial value 0xffff.
+///
+/// Matches Zephyr's `crc16_ccitt` configuration, which uses reversed
+/// input and output. This is equivalent to a reflected CRC-16/CCITT
+/// with polynomial 0x8408, seed 0xffff, and no final XOR.
 fn crc16_ccitt(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xffff;
 
     for &byte in data {
-        crc ^= (byte as u16) << 8;
+        crc ^= byte as u16;
         for _ in 0..8 {
-            if (crc & 0x8000) != 0 {
-                crc = (crc << 1) ^ 0x1021;
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ 0x8408;
             } else {
-                crc <<= 1;
+                crc >>= 1;
             }
         }
     }
