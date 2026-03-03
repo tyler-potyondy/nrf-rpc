@@ -364,7 +364,7 @@ fn test_client_can_send_packet() {
     let mut processes = run_zephyr_rpc_server_exe();
 
     // Wait for the server to start.
-    std::thread::sleep(Duration::from_secs(5));
+    std::thread::sleep(Duration::from_secs(1));
 
     println!("Starting client...");
     let mut uart = MockUart::new();
