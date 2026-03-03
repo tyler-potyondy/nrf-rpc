@@ -374,11 +374,13 @@ fn test_client_can_send_packet() {
     for _ in 0..50 {
         let line = processes.get_rpc_server_stdout_line(Duration::from_millis(5));
         if let Some(line) = line {
-            println!("{}", line);
+            if line.contains("<dbg> nrf_rpc_uart: >>> RX packet") {
+                return; // Test passed
+            }
         }
     }
 
-    panic!("Test failed");
+    panic!("No packet received from server");
 }
 
 /*
