@@ -177,7 +177,8 @@ pub mod TestProcessInfra {
     use std::{
         io::{BufReader, Lines},
         process::ChildStdout,
-        time::{Duration, Instant},
+        sync::mpsc,
+        time::Duration,
     };
 
     type ZephyrServerProcess = std::process::Child;
@@ -185,7 +186,7 @@ pub mod TestProcessInfra {
 
     pub struct TestProcesses {
         rpc_server: ZephyrServerProcess,
-        rpc_server_stdout: Lines<BufReader<ChildStdout>>,
+        rpc_server_stdout_rx: mpsc::Receiver<String>,
         socat: SocatProcess,
     }
 
@@ -195,23 +196,28 @@ pub mod TestProcessInfra {
             rpc_server_stdout: Lines<BufReader<ChildStdout>>,
             socat: SocatProcess,
         ) -> Self {
+            let (tx, rx) = mpsc::channel::<String>();
+
+            std::thread::spawn(move || {
+                for line in rpc_server_stdout {
+                    let Ok(line) = line else { break };
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+
             Self {
                 rpc_server,
-                rpc_server_stdout,
+                rpc_server_stdout_rx: rx,
                 socat,
             }
         }
 
         /// Call to get the next line of stdout from the RPC server process,
-        /// blocking for specified duration, and then returning None if no line is available.
+        /// waiting up to `timeout`, and returning None if no line is available.
         pub fn get_rpc_server_stdout_line(&mut self, timeout: Duration) -> Option<String> {
-            let start = Instant::now();
-            while Instant::now() - start < timeout {
-                if let Some(line) = self.rpc_server_stdout.next() {
-                    return Some(line.expect("Failed to read stdout"));
-                }
-            }
-            None
+            self.rpc_server_stdout_rx.recv_timeout(timeout).ok()
         }
 
         fn kill(&mut self) {
@@ -384,6 +390,36 @@ fn test_client_can_send_packet() {
         }
     }
 
+    panic!("No packet received from server");
+}
+
+#[test]
+#[serial]
+fn test_client_acks_packets() {
+    println!("Starting client can ack packets test...");
+
+    let mut processes = run_zephyr_rpc_server_exe();
+
+    // Wait for the server to start.
+    std::thread::sleep(Duration::from_secs(1));
+
+    println!("Starting client...");
+    let mut uart = MockUart::new();
+    let transport = NrfRpcUartTransport::new(&mut uart);
+    let mut client: RpcClient<NrfRpcUartTransport<'_, MockUart>> = RpcClient::new(transport);
+    block_on(client.init()).expect("Failed to initialize client");
+
+    // Client has transmitted, let's check that the server received the packet.
+    // Print the server's stdout.
+    for _ in 0..50 {
+        let line = processes.get_rpc_server_stdout_line(Duration::from_millis(5));
+        if let Some(line) = line {
+            println!("{}", line);
+            if line.contains("<dbg> nrf_rpc_uart: >>> RX ack") {
+                return; // Test passed
+            }
+        }
+    }
     panic!("No packet received from server");
 }
 
