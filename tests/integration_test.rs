@@ -7,7 +7,7 @@
 //! rx/tx to a unix socket. The test here then provides a mock transport layer that
 //! directs client writes to this socket and polls for responses on the socket.
 
-use nrf_rpc::{AsyncTransport, NrfRpcUartTransport, RpcClient, TransportError, UartTransport};
+use nrf_rpc::{NrfRpcUartTransport, RpcClient, TransportError, UartTransport};
 use serial_test::serial;
 use std::collections::HashSet;
 use std::io::{BufRead, Read, Write};
@@ -265,6 +265,7 @@ const SOCAT_SOCKET_PATH: &str = "/tmp/nrf_rpc_socket";
 use std::io::BufReader;
 pub mod TestProcessInfra {
     use std::{
+        collections::HashSet,
         io::{BufReader, Lines},
         process::ChildStdout,
         sync::mpsc,
@@ -304,6 +305,34 @@ pub mod TestProcessInfra {
             }
         }
 
+        pub fn search_stdout_for_strings(&mut self, search_strings: HashSet<&str>) {
+            let mut expected_index = 0;
+            for _ in 0..500 {
+                if expected_index >= search_strings.len() {
+                    println!("Found all expected outputs!");
+                    return; // Test passed
+                }
+
+                let line = self.get_rpc_server_stdout_line(Duration::from_millis(5));
+                if let Some(line) = line {
+                    println!("{}", line);
+                    for search_string in search_strings.iter() {
+                        if line.contains(search_string) {
+                            println!("Found expected line: {}", line);
+                            expected_index += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            panic!(
+                "{}/{} expected outputs found",
+                expected_index,
+                search_strings.len()
+            );
+        }
+
         /// Call to get the next line of stdout from the RPC server process,
         /// waiting up to `timeout`, and returning None if no line is available.
         pub fn get_rpc_server_stdout_line(&mut self, timeout: Duration) -> Option<String> {
@@ -338,7 +367,7 @@ use TestProcessInfra::TestProcesses;
 ///
 /// This outputs verbose output we capture and will process later to determine
 /// if the client/server are working properly.
-fn run_zephyr_rpc_server_exe() -> TestProcesses {
+fn run_zephyr_rpc_server_exe() -> (TestProcesses, MockUart) {
     use std::process::{Command, Stdio};
 
     let mut rpc_server = Command::new("sh")
@@ -378,7 +407,8 @@ fn run_zephyr_rpc_server_exe() -> TestProcesses {
     };
 
     let socat = create_socat_socket(&interface, SOCAT_SOCKET_PATH);
-    TestProcesses::new(rpc_server, lines, socat)
+    let uart = MockUart::new();
+    (TestProcesses::new(rpc_server, lines, socat), uart)
 }
 
 fn create_socat_socket(pty_port: &str, socket_path: &str) -> std::process::Child {
@@ -419,7 +449,7 @@ fn test_zephyr_rpc_server() {
 
     const TEST_DURATION: u64 = 10; // seconds
 
-    let mut processes = run_zephyr_rpc_server_exe();
+    let (mut processes, _) = run_zephyr_rpc_server_exe();
     let expected = [
         "<inf> nrf_ps_server: Initializing RPC server",
         "<dbg> NRF_RPC: Done initializing nRF RPC module",
@@ -457,143 +487,42 @@ fn test_zephyr_rpc_server() {
 fn test_client_can_send_packet() {
     println!("Starting client can send packet test...");
 
-    client_test_helper(HashSet::from(["<dbg> nrf_rpc_uart: >>> RX packet"]));
+    // First start the Zephyr RPC server and socat bridge so that the UNIX
+    // socket exists and is listening before the MockUart attempts to connect.
+    let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
+
+    let _client = client_test_helper(&mut uart);
+    processes.search_stdout_for_strings(HashSet::from(["<dbg> nrf_rpc_uart: >>> RX packet"]));
 }
 
-// Test requires nrf rpc reliable mode to be enabled which our server currently does not.
 // #[test]
 // #[serial]
-fn test_client_acks_packets() {
-    println!("Starting client can ack packets test...");
-
-    client_test_helper(HashSet::from(["<dbg> nrf_rpc_uart: >>> RX ack"]));
-}
+// fn test_client_acks_packets() {
+//     println!("Starting client can ack packets test...");
+//
+//     let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
+//     let _client = client_test_helper(&mut uart);
+//     processes.search_stdout_for_strings(HashSet::from(["<dbg> nrf_rpc_uart: >>> RX ack"]));
+// }
 
 #[test]
 #[serial]
 fn test_client_group_handshake() {
     println!("Starting client group handshake test...");
 
-    client_test_helper(HashSet::from([
+    let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
+    let _client = client_test_helper(&mut uart);
+    processes.search_stdout_for_strings(HashSet::from([
         "NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0",
         "NRF_RPC: Found corresponding local group. Remote id: 1, Local id: 1",
     ]));
 }
 
-fn client_test_helper(search_strings: HashSet<&str>) {
-    let mut processes = run_zephyr_rpc_server_exe();
+fn client_test_helper<'a>(uart: &'a mut MockUart) -> RpcClient<NrfRpcUartTransport<'a, MockUart>> {
     std::thread::sleep(Duration::from_secs(1));
-    let mut uart = MockUart::new();
-    let transport = NrfRpcUartTransport::new(&mut uart);
-    let mut client: RpcClient<NrfRpcUartTransport<'_, MockUart>> = RpcClient::new(transport);
+    let transport = NrfRpcUartTransport::new(uart);
+    let mut client: RpcClient<NrfRpcUartTransport<'a, MockUart>> = RpcClient::new(transport);
     block_on(client.init()).expect("Failed to initialize client");
 
-    let mut expected_index = 0;
-    for _ in 0..500 {
-        if expected_index >= search_strings.len() {
-            println!("Found all expected outputs!");
-            return; // Test passed
-        }
-
-        let line = processes.get_rpc_server_stdout_line(Duration::from_millis(5));
-        if let Some(line) = line {
-            println!("{}", line);
-            for search_string in search_strings.iter() {
-                if line.contains(search_string) {
-                    println!("Found expected line: {}", line);
-                    expected_index += 1;
-                    break;
-                }
-            }
-        }
-    }
-
-    panic!(
-        "{}/{} expected outputs found",
-        expected_index,
-        search_strings.len()
-    );
+    client
 }
-
-/*
-#[test]
-fn test_bt_enable_generates_correct_packet() {
-    block_on(async {
-        // From trace: bt_enable() generates this packet
-        // Note: In real usage with responses, group IDs would be 0x00
-        // but our mock doesn't simulate responses, so they stay at 0xFF
-        let expected_packet = hex_to_bytes("80 00 FF FF FF 18 1C 18 1C F6");
-
-        let uart = MockUart::new();
-        let uart_clone = uart.clone(); // Keep a reference to check packets
-
-        // new() automatically initializes RPC and sends 2 init packets
-        let mut ble = Ble::new(uart).await.ok().unwrap();
-        uart_clone.clear_packets();
-
-        // Call bt_enable
-        ble.bt_enable().await.ok();
-
-        let packets = uart_clone.get_sent_packets();
-        assert_eq!(packets.len(), 1, "Expected 1 packet from bt_enable");
-
-        assert_eq!(
-            packets[0], expected_packet,
-            "bt_enable packet mismatch\nExpected: {:02X?}\nGot:      {:02X?}",
-            expected_packet, packets[0]
-        );
-    });
-}
-
-#[test]
-fn test_bt_le_adv_start_generates_correct_packet() {
-    block_on(async {
-        // From trace: "bt advertise on" command generates this packet
-        // Note: In real usage with responses, group IDs would be 0x00
-        // but our mock doesn't simulate responses, so they stay at 0xFF
-        let expected_packet = hex_to_bytes(
-            "80 04 FF FF FF 18 20 00 00 00 03 18 A0 18 F0 F6 \
-             01 01 01 41 06 01 09 09 49 4E 6F 72 64 69 63 5F 50 53 F6",
-        );
-
-        let uart = MockUart::new();
-        let uart_clone = uart.clone(); // Keep a reference to check packets
-
-        // new() automatically initializes RPC and sends 2 init packets
-        let mut ble = Ble::new(uart).await.ok().unwrap();
-        uart_clone.clear_packets();
-
-        // Call bt_le_adv_start with the same parameters as the trace
-        let param = BtLeAdvParam {
-            id: 0,
-            sid: 0,
-            secondary_max_skip: 0,
-            options: 0x03, // BT_LE_ADV_OPT_CONNECTABLE | connectable-something
-            interval_min: 160,
-            interval_max: 240,
-            peer: None,
-        };
-
-        let ad = [BtData {
-            data_type: BT_DATA_FLAGS,
-            data: &[BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR],
-        }];
-
-        let sd = [BtData {
-            data_type: BT_DATA_NAME_COMPLETE,
-            data: b"Nordic_PS",
-        }];
-
-        ble.bt_le_adv_start(&param, &ad, &sd).await.ok();
-
-        let packets = uart_clone.get_sent_packets();
-        assert_eq!(packets.len(), 1, "Expected 1 packet from bt_le_adv_start");
-
-        assert_eq!(
-            packets[0], expected_packet,
-            "bt_le_adv_start packet mismatch\nExpected: {:02X?}\nGot:      {:02X?}",
-            expected_packet, packets[0]
-        );
-    });
-}
-*/
