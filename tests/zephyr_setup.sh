@@ -93,5 +93,5 @@ fi
 
 echo $PWD
 
-west build -b nrf52_bsim -p always --build-dir build/zephyr_server_app nrf/samples/nrf_rpc/protocols_serialization/server
+west build -b nrf52_bsim -p always --build-dir build/zephyr_server_app nrf/samples/nrf_rpc/protocols_serialization/server -S ble
 
