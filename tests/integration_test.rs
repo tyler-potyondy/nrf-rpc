@@ -8,6 +8,7 @@
 //! directs client writes to this socket and polls for responses on the socket.
 
 use nrf_rpc::{AsyncTransport, NrfRpcUartTransport, RpcClient, TransportError, UartTransport};
+use serial_test::serial;
 use std::io::{BufRead, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
@@ -315,6 +316,7 @@ fn create_socat_socket(pty_port: &str, socket_path: &str) -> std::process::Child
 }
 
 #[test]
+#[serial]
 /// Basic functionality test to launch server. No client interactions for this test.
 fn test_zephyr_rpc_server() {
     println!("Starting Zephyr RPC server test to test that the server launches properly.");
@@ -354,6 +356,7 @@ fn test_zephyr_rpc_server() {
 }
 
 #[test]
+#[serial]
 /// Test the client can send a packet and receive an ACK.
 fn test_client_can_send_packet() {
     println!("Starting client can send packet test...");
@@ -374,6 +377,7 @@ fn test_client_can_send_packet() {
     for _ in 0..50 {
         let line = processes.get_rpc_server_stdout_line(Duration::from_millis(5));
         if let Some(line) = line {
+            println!("{}", line);
             if line.contains("<dbg> nrf_rpc_uart: >>> RX packet") {
                 return; // Test passed
             }
