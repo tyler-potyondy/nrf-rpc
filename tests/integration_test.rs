@@ -9,7 +9,8 @@
 
 use nrf_rpc::{AsyncTransport, NrfRpcUartTransport, RpcClient, TransportError, UartTransport};
 use serial_test::serial;
-use std::io::{BufRead, Write};
+use std::collections::HashSet;
+use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,11 +27,13 @@ impl core::fmt::Display for MockError {
 impl TransportError for MockError {}
 
 /// Mock UART transport that records all written packets and forwards them to
-/// the Zephyr server via the socat UNIX socket.
+/// the Zephyr server via the socat UNIX socket, while continuously reading
+/// bytes from the socket into an internal RX buffer.
 struct MockUart {
     socat_socket_path: String,
     sent_packets: Arc<Mutex<Vec<Vec<u8>>>>,
     socket: UnixStream,
+    rx_buffer: Arc<Mutex<Vec<u8>>>,
 }
 
 impl MockUart {
@@ -63,10 +66,61 @@ impl MockUart {
             .set_nonblocking(false)
             .expect("Failed to configure socat UNIX socket");
 
+        // Shared RX buffer where the background reader thread will place bytes
+        // received from the Zephyr UART via the UNIX socket.
+        let rx_buffer = Arc::new(Mutex::new(Vec::new()));
+
+        // Clone pieces needed for the background RX thread.
+        let rx_buffer_clone = Arc::clone(&rx_buffer);
+        let socat_socket_path_clone = socat_socket_path.clone();
+        let mut read_socket = socket
+            .try_clone()
+            .expect("Failed to clone socat UNIX socket for RX thread");
+
+        // Spawn a background thread that continuously reads from the socket and
+        // appends data into the RX buffer. This emulates a UART RX IRQ/DMA
+        // filling a hardware FIFO.
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            loop {
+                match read_socket.read(&mut buf) {
+                    Ok(0) => {
+                        println!(
+                            "MockUart RX thread: EOF while reading from socat socket {}",
+                            socat_socket_path_clone
+                        );
+                        break;
+                    }
+                    Ok(n) => {
+                        // Useful for debugging socket/UART rx
+                        // println!(
+                        //     "MockUart RX thread: Received {} bytes from {}: {:02X?}",
+                        //     n,
+                        //     socat_socket_path_clone,
+                        //     &buf[..n]
+                        // );
+                        let mut rx = rx_buffer_clone.lock().unwrap();
+                        rx.extend_from_slice(&buf[..n]);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        continue;
+                    }
+                    Err(e) => {
+                        println!(
+                            "MockUart RX thread: Read error from socat socket {}: {}",
+                            socat_socket_path_clone, e
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+
         Self {
             socat_socket_path,
             sent_packets: Arc::new(Mutex::new(Vec::new())),
             socket,
+            rx_buffer,
         }
     }
 
@@ -117,9 +171,45 @@ impl UartTransport for MockUart {
         Ok(data.len())
     }
 
-    async fn read(&mut self, _buffer: &mut [u8]) -> Result<usize, Self::Error> {
-        // For these tests, we don't simulate responses
-        Ok(0)
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
+        use std::time::{Duration, Instant};
+
+        // Poll the RX buffer for a bounded amount of time so our minimal
+        // executor (which expects futures to be immediately ready) does not
+        // get stuck forever if no data arrives.
+        let timeout = Duration::from_secs(5);
+        let start = Instant::now();
+
+        loop {
+            {
+                let mut rx = self.rx_buffer.lock().unwrap();
+                if !rx.is_empty() {
+                    let n = core::cmp::min(buffer.len(), rx.len());
+                    buffer[..n].copy_from_slice(&rx[..n]);
+                    rx.drain(0..n);
+
+                    // Useful for debugging socket/UART rx
+                    // println!(
+                    //     "MockUart: Delivering {} bytes from RX buffer to client: {:02X?}",
+                    //     n,
+                    //     &buffer[..n]
+                    // );
+
+                    return Ok(n);
+                }
+            }
+
+            if start.elapsed() >= timeout {
+                println!(
+                    "MockUart: Read timeout from RX buffer for socat socket {}",
+                    self.socat_socket_path
+                );
+                return Ok(0);
+            }
+
+            // Sleep briefly before polling again to avoid a busy loop.
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -367,60 +457,62 @@ fn test_zephyr_rpc_server() {
 fn test_client_can_send_packet() {
     println!("Starting client can send packet test...");
 
-    let mut processes = run_zephyr_rpc_server_exe();
+    client_test_helper(HashSet::from(["<dbg> nrf_rpc_uart: >>> RX packet"]));
+}
 
-    // Wait for the server to start.
-    std::thread::sleep(Duration::from_secs(1));
+// Test requires nrf rpc reliable mode to be enabled which our server currently does not.
+// #[test]
+// #[serial]
+fn test_client_acks_packets() {
+    println!("Starting client can ack packets test...");
 
-    println!("Starting client...");
-    let mut uart = MockUart::new();
-    let transport = NrfRpcUartTransport::new(&mut uart);
-    let mut client: RpcClient<NrfRpcUartTransport<'_, MockUart>> = RpcClient::new(transport);
-    block_on(client.init()).expect("Failed to initialize client");
-
-    // Client has transmitted, let's check that the server received the packet.
-    // Print the server's stdout.
-    for _ in 0..50 {
-        let line = processes.get_rpc_server_stdout_line(Duration::from_millis(5));
-        if let Some(line) = line {
-            println!("{}", line);
-            if line.contains("<dbg> nrf_rpc_uart: >>> RX packet") {
-                return; // Test passed
-            }
-        }
-    }
-
-    panic!("No packet received from server");
+    client_test_helper(HashSet::from(["<dbg> nrf_rpc_uart: >>> RX ack"]));
 }
 
 #[test]
 #[serial]
-fn test_client_acks_packets() {
-    println!("Starting client can ack packets test...");
+fn test_client_group_handshake() {
+    println!("Starting client group handshake test...");
 
+    client_test_helper(HashSet::from([
+        "NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0",
+        "NRF_RPC: Found corresponding local group. Remote id: 1, Local id: 1",
+    ]));
+}
+
+fn client_test_helper(search_strings: HashSet<&str>) {
     let mut processes = run_zephyr_rpc_server_exe();
-
-    // Wait for the server to start.
     std::thread::sleep(Duration::from_secs(1));
-
-    println!("Starting client...");
     let mut uart = MockUart::new();
     let transport = NrfRpcUartTransport::new(&mut uart);
     let mut client: RpcClient<NrfRpcUartTransport<'_, MockUart>> = RpcClient::new(transport);
     block_on(client.init()).expect("Failed to initialize client");
 
-    // Client has transmitted, let's check that the server received the packet.
-    // Print the server's stdout.
-    for _ in 0..50 {
+    let mut expected_index = 0;
+    for _ in 0..500 {
+        if expected_index >= search_strings.len() {
+            println!("Found all expected outputs!");
+            return; // Test passed
+        }
+
         let line = processes.get_rpc_server_stdout_line(Duration::from_millis(5));
         if let Some(line) = line {
             println!("{}", line);
-            if line.contains("<dbg> nrf_rpc_uart: >>> RX ack") {
-                return; // Test passed
+            for search_string in search_strings.iter() {
+                if line.contains(search_string) {
+                    println!("Found expected line: {}", line);
+                    expected_index += 1;
+                    break;
+                }
             }
         }
     }
-    panic!("No packet received from server");
+
+    panic!(
+        "{}/{} expected outputs found",
+        expected_index,
+        search_strings.len()
+    );
 }
 
 /*
