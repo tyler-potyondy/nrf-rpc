@@ -51,40 +51,59 @@ impl From<CborError> for RpcError {
 
 pub struct RpcTransportBuffer<'a> {
     buffer: &'a mut [u8],
-    pos: usize,
+    start_pos: usize,
+    end_pos: usize,
 }
 
 impl<'a> From<RpcTransportBuffer<'a>> for &'a [u8] {
     fn from(value: RpcTransportBuffer<'a>) -> Self {
-        &value.buffer[..value.pos]
+        &value.buffer[value.start_pos..value.end_pos]
+    }
+}
+
+impl<'a> From<RpcTransportBuffer<'a>> for &'a mut [u8] {
+    fn from(value: RpcTransportBuffer<'a>) -> Self {
+        &mut value.buffer[value.start_pos..value.end_pos]
     }
 }
 
 impl<'a> RpcTransportBuffer<'a> {
     pub fn new(buffer: &'a mut [u8]) -> Self {
-        Self { buffer, pos: 0 }
+        Self {
+            buffer,
+            end_pos: 0,
+            start_pos: 0,
+        }
     }
 
     pub fn remaining_len(&self) -> usize {
-        self.buffer.len() - self.pos
+        self.buffer.len() - self.end_pos
     }
 
     pub fn write_slice_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
-        if self.pos + data.len() > self.buffer.len() {
+        if self.end_pos + data.len() > self.buffer.len() {
             return Err(());
         }
-        self.buffer[self.pos..self.pos + data.len()].copy_from_slice(data);
-        self.pos += data.len();
+        self.buffer[self.end_pos..self.end_pos + data.len()].copy_from_slice(data);
+        self.end_pos += data.len();
         Ok(())
     }
 
     pub fn write_byte_into_or_err(&mut self, data: u8) -> Result<(), ()> {
-        if self.pos + 1 > self.buffer.len() {
+        if self.end_pos + 1 > self.buffer.len() {
             return Err(());
         }
-        self.buffer[self.pos] = data;
-        self.pos += 1;
+        self.buffer[self.end_pos] = data;
+        self.end_pos += 1;
         Ok(())
+    }
+
+    pub fn read_byte_or_err(&mut self) -> Result<u8, ()> {
+        if self.start_pos + 1 > self.buffer.len() {
+            return Err(());
+        }
+        self.start_pos += 1;
+        Ok(self.buffer[self.start_pos - 1])
     }
 }
 
@@ -135,7 +154,9 @@ impl<T: AsyncTransport> RpcClient<T> {
             bt_rpc_init_packet_payload,
         );
 
-        self.send_packet(bt_rpc_init_packet).await?;
+        self.send_packet(bt_rpc_init_packet)
+            .await
+            .expect("Failed to send bt_rpc init packet");
 
         let bt_rpc_init_packet_payload = packet::InitPacketPayload::new(
             &mut buffer,
@@ -151,7 +172,11 @@ impl<T: AsyncTransport> RpcClient<T> {
             bt_rpc_init_packet_payload,
         );
 
-        self.send_packet(bt_rpc_init_packet).await
+        self.send_packet(bt_rpc_init_packet)
+            .await
+            .expect("Failed to send rpc_utils init packet");
+
+        Ok(())
     }
 
     // Accessor methods for internal use by command modules
@@ -172,12 +197,12 @@ impl<T: AsyncTransport> RpcClient<T> {
 
         packet
             .write_into(&mut rpc_transport_buf)
-            .map_err(|_| RpcError::InvalidResponse)?;
+            .expect("Failed to write packet into transport buffer");
 
         self.transport
             .write(rpc_transport_buf.into())
             .await
-            .map_err(|_| RpcError::Transport)?;
+            .expect("Failed to write packet to transport");
 
         // (todo) error handling
         Ok(())

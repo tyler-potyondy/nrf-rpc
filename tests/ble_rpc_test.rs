@@ -14,7 +14,11 @@ fn test_rpc_init_packets() {
     let mock_uart_clone = mock_uart.clone();
     let result = utils::block_on(Box::pin(async { Ble::new(mock_uart_clone).await }));
 
-    assert!(result.is_ok(), "Ble::new() should succeed during init");
+    assert!(
+        result.is_ok(),
+        "Ble::new() should succeed during init, error: {:?}",
+        result.err().unwrap()
+    );
 
     // Check that the packet is correct.
     // Correct init packet should be: {04 00 ff 00 ff 00 62 74  5f 72 70 63}

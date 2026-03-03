@@ -146,6 +146,37 @@ impl<'a, U: UartTransport> NrfRpcUartTransport<'a, U> {
 
         Ok(())
     }
+
+    fn decode_uart_frame(
+        &mut self,
+        input_buffer: &mut RpcTransportBuffer,
+        output_buffer: &mut RpcTransportBuffer,
+    ) -> Result<(), ()> {
+        // Remove delimiter byte.
+        if input_buffer.read_byte_or_err()? != DELIMITER {
+            return Err(()); // Expected delimiter byte not found.
+        }
+
+        // Read everything except last byte (delimiter byte).
+        while input_buffer.remaining_len() > 1 {
+            let byte = input_buffer.read_byte_or_err()?;
+
+            if byte == ESCAPE {
+                let next_byte = input_buffer.read_byte_or_err()?;
+                // Undo the XORing of the escape byte.
+                output_buffer.write_byte_into_or_err(next_byte ^ 0x20)?;
+            } else {
+                output_buffer.write_byte_into_or_err(byte)?;
+            }
+        }
+
+        // Read last byte (delimiter byte).
+        if input_buffer.read_byte_or_err()? != DELIMITER {
+            return Err(()); // Expected delimiter byte not found.
+        }
+
+        Ok(())
+    }
 }
 
 impl<'a, U: UartTransport> AsyncTransport for NrfRpcUartTransport<'a, U> {
@@ -161,9 +192,29 @@ impl<'a, U: UartTransport> AsyncTransport for NrfRpcUartTransport<'a, U> {
         self.uart.write(buffer.into()).await
     }
 
+    /// Read from Uart, decode the frame, ACK (send received checksum, no encoding needed).
     async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
-        // Read from Uart, then decode UartFrame.
-        self.uart.read(buffer).await
+        let mut read_buffer: &mut [u8] = &mut [0; 200];
+        self.uart.read(read_buffer).await?;
+
+        let mut read_output_buffer = RpcTransportBuffer::new(read_buffer);
+
+        // Decode packet from buffer.
+        let mut read_input_buffer = RpcTransportBuffer::new(buffer);
+
+        self.decode_uart_frame(&mut read_input_buffer, &mut read_output_buffer)
+            .expect("Failed to decode UART frame");
+
+        // Send ACK (last 2 bytes of the frame).
+        let output_read_buffer = read_input_buffer.into();
+        let mut ack_buffer = [0; 2];
+        ack_buffer.copy_from_slice(output_read_buffer);
+        self.uart
+            .write(&ack_buffer)
+            .await
+            .expect("Failed to send ACK");
+
+        Ok(output_read_buffer.len())
     }
 }
 
