@@ -56,6 +56,7 @@ pub trait AsyncTransport {
     async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error>;
 }
 
+#[derive(Debug)]
 pub struct TransportBuffer<'a, const N: usize> {
     buffer: &'a mut [u8; N],
     start_pos: usize,
@@ -124,7 +125,6 @@ impl<'a, const N: usize> TransportBuffer<'a, N> {
     }
 
     pub fn write_byte_into_or_err(&mut self, data: u8) -> Result<(), ()> {
-
         if self.end_pos + 1 > self.buffer.len() {
             return Err(());
         }
@@ -139,6 +139,19 @@ impl<'a, const N: usize> TransportBuffer<'a, N> {
         }
         self.start_pos += 1;
         Ok(self.buffer[self.start_pos - 1])
+    }
+
+    /// Reset the TransportBuffer by copying the new slice into the buffer
+    /// and resetting the start and end positions.
+    pub fn reset_with_new_slice(mut self, new_slice: &[u8]) -> Result<Self, (Self, ())> {
+        if new_slice.len() > N {
+            return Err((self, ()));
+        }
+
+        self.buffer[..new_slice.len()].copy_from_slice(new_slice);
+        self.start_pos = 0;
+        self.end_pos = new_slice.len();
+        Ok(self)
     }
 }
 

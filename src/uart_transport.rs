@@ -3,6 +3,76 @@
 //! The nRF RPC UART transport allows you to use the `nrf_rpc` protocol to execute
 //! procedures on a remote processor that is connected with the local processor using
 //! the UART interface.
+//!
+//! Below docs from Nordic:
+//!
+//! Frame encoding for the nRF RPC UART transport.
+//
+//! =========================================================================
+//! (NOTE) The current frame format is experimental and is a subject to change.
+//! =========================================================================
+//
+//! An nRF RPC packet that is sent using the nRF RPC UART transport is encoded
+//! within a frame whose format resembles the one used by the HDLC protocol:
+//
+//! - Each frame shall start and end with the delimiter octet (0b01111110 = 0x7e).
+//! - Each two subsequent frames may be separated by more than one delimiter octet.
+//! - Each byte of the nRF RPC packet shall be encoded according to the following rules:
+//!     - If the byte matches one of the nrf_rpc_uart special octets, it shall be encoded
+//!       as the following two octets:
+//!         - the escape octet (0x7d),
+//!         - the input byte XORed with 0x20.
+//!     - Otherwise, the byte shall be encoded into a frame’s octet without changes.
+//! - The last two bytes of the frame contain the nRF RPC packet checksum, in
+//!   little-endian byte order. The checksum is calculated using the CRC16_CCITT
+//!   function with the initial value ``0xffff``.
+//
+//! Special octets
+//! ==============
+//
+//! The following octets transmitted over the UART interface have a special meaning:
+//
+//! +-----------+-----------+
+//! | Value     | Meaning   |
+//! +===========+===========+
+//! |   0x7d    | escape    |
+//! +-----------+-----------+
+//! |   0x7e    | delimiter |
+//! +-----------+-----------+
+//
+//! Encoding example
+//! ================
+//
+//! If the following nRF RPC packet is sent using the nRF RPC UART transport:
+//!   80 01 ff 00 00 61 7e f6
+//
+//! Then the following octets are transmitted over the UART interface:
+//!                    |-2 byte checksum-||--delimiter byte--|
+//!                                  v  v  v
+//!   7e 80 01 ff 00 00 61 7d 5e f6 6d 72 7e
+//!                         ^  ^  
+//!              |-escape octet, XORed byte-|  
+//
+//! Reliability
+//! ===========
+//
+//! The nRF RPC UART transport may optionally enable a reliability feature.
+//
+//! The reliability feature introduces the following changes to the transport protocol:
+//!   - The receiver of a valid frame acknowledges the frame by replying to the
+//!     sender with the frame's checksum field.
+//!   - If a sender has not received an acknowledgment within a certain time, it
+//!     retransmits the frame.
+//!     The time (in milliseconds) is defined using XXXXXXXX.
+//!   - If the sender has not received an acknowledgment after a certain number of
+//!     attempts, it gives up and reports the transmission error. The number of attempts
+//!     is defined using XXXXX.
+//!   - The frame's checksum field is composed of two values:
+//!       - the most significant bit is the sequence bit that is flipped by the sender
+//!         for each new transmission.
+//!       - the remaining bits are 15 least significant bits of the nRF RPC packet checksum.
+//!   - If the received frame has the same checksum field as the previous one, it is
+//!     rejected as a duplicate.
 
 use crate::{
     AsyncTransport, TransportError,
@@ -14,256 +84,21 @@ const ESCAPE: u8 = 0x7d;
 /// nRF RPC UART Frame Delimiter Byte.
 const DELIMITER: u8 = 0x7e;
 
-/// Frame encoding for the nRF RPC UART transport.
-///
-/// =========================================================================
-/// (NOTE) The current frame format is experimental and is a subject to change.
-/// =========================================================================
-///
-/// An nRF RPC packet that is sent using the nRF RPC UART transport is encoded
-/// within a frame whose format resembles the one used by the HDLC protocol:
-///
-/// - Each frame shall start and end with the delimiter octet (0b01111110 = 0x7e).
-/// - Each two subsequent frames may be separated by more than one delimiter octet.
-/// - Each byte of the nRF RPC packet shall be encoded according to the following rules:
-///     - If the byte matches one of the nrf_rpc_uart special octets, it shall be encoded
-///       as the following two octets:
-///         - the escape octet (0x7d),
-///         - the input byte XORed with 0x20.
-///     - Otherwise, the byte shall be encoded into a frame’s octet without changes.
-/// - The last two bytes of the frame contain the nRF RPC packet checksum, in
-///   little-endian byte order. The checksum is calculated using the CRC16_CCITT
-///   function with the initial value ``0xffff``.
-///
-/// Special octets
-/// ==============
-///
-/// The following octets transmitted over the UART interface have a special meaning:
-///
-/// +-----------+-----------+
-/// | Value     | Meaning   |
-/// +===========+===========+
-/// |   0x7d    | escape    |
-/// +-----------+-----------+
-/// |   0x7e    | delimiter |
-/// +-----------+-----------+
-///
-/// Encoding example
-/// ================
-///
-/// If the following nRF RPC packet is sent using the nRF RPC UART transport:
-///   80 01 ff 00 00 61 7e f6
-///
-/// Then the following octets are transmitted over the UART interface:
-///                    |-2 byte checksum-||--delimiter byte--|
-///                                  v  v  v
-///   7e 80 01 ff 00 00 61 7d 5e f6 6d 72 7e
-///                         ^  ^  
-///              |-escape octet, XORed byte-|  
-///
-/// Reliability
-/// ===========
-///
-/// The nRF RPC UART transport may optionally enable a reliability feature.
-///
-/// The reliability feature introduces the following changes to the transport protocol:
-///   - The receiver of a valid frame acknowledges the frame by replying to the
-///     sender with the frame's checksum field.
-///   - If a sender has not received an acknowledgment within a certain time, it
-///     retransmits the frame.
-///     The time (in milliseconds) is defined using XXXXXXXX.
-///   - If the sender has not received an acknowledgment after a certain number of
-///     attempts, it gives up and reports the transmission error. The number of attempts
-///     is defined using XXXXX.
-///   - The frame's checksum field is composed of two values:
-///       - the most significant bit is the sequence bit that is flipped by the sender
-///         for each new transmission.
-///       - the remaining bits are 15 least significant bits of the nRF RPC packet checksum.
-///   - If the received frame has the same checksum field as the previous one, it is
-///     rejected as a duplicate.
-// struct UartFrame<const N: usize, M: Mode> {
-//     base_frame: [u8; N],
-// }
-
-/*
-pub struct NrfRpcUartTransport<'a, U: UartTransport> {
-    uart: &'a mut U,
-}
-
-
-impl<'a, U: UartTransport> NrfRpcUartTransport<'a, U> {
-    pub fn new(uart: &'a mut U) -> Self {
-        Self { uart }
-    }
-
-    /// Write a single byte into the frame, applying UART escape rules.
-    fn write_escaped_byte(&self, buffer: &mut RpcTransportBuffer, byte: u8) -> Result<(), ()> {
-        if byte == ESCAPE || byte == DELIMITER {
-            buffer.write_byte_into_or_err(ESCAPE)?;
-            buffer.write_byte_into_or_err(byte ^ 0x20)
-        } else {
-            buffer.write_byte_into_or_err(byte)
-        }
-    }
-
-    fn encode_uart_frame<const N: usize>(
-        &mut self,
-        buffer: RpcTransportBuffer<'a, N>,
-    ) -> Result<RpcTransportBuffer<'a, N>, ()> {
-        // Add deliminter byte.
-        buffer.write_byte_into_or_err(DELIMITER).expect("Failed to write delimiter byte");
-
-        // Add copy data bytes into buffer, checking for special bytes (escape, delimiter).
-        // If find a special byte, add the escape byte and the XORed byte.
-        for byte in data {
-            self.write_escaped_byte(buffer, *byte).expect("Failed to write escaped byte");
-        }
-
-        // Add checksum bytes.
-        let checksum = crc16_ccitt(data).to_le_bytes();
-        self.write_escaped_byte(buffer, checksum[0])?;
-        self.write_escaped_byte(buffer, checksum[1])?;
-
-        // Add deliminter byte.
-        buffer.write_byte_into_or_err(DELIMITER)?;
-
-        Ok(())
-    }
-
-    fn decode_uart_frame(
-        &mut self,
-        input_buffer: &mut RpcTransportBuffer,
-        output_buffer: &mut RpcTransportBuffer,
-    ) -> Result<(), ()> {
-        // Remove delimiter byte.
-        if input_buffer.read_byte_or_err()? != DELIMITER {
-            panic!(
-                "Expected delimiter byte not found {:02x?}",
-                input_buffer.buffer
-            );
-            return Err(()); // Expected delimiter byte not found.
-        }
-
-        // Read everything except last byte (delimiter byte).
-        while input_buffer.start_pos + 1 < input_buffer.end_pos
-            && input_buffer.read_byte_or_err()? != DELIMITER
-        {
-            let byte = input_buffer
-                .read_byte_or_err()
-                .expect("Failed to read byte");
-
-            if byte == ESCAPE {
-                let next_byte = input_buffer
-                    .read_byte_or_err()
-                    .expect("Failed to read byte");
-                // Undo the XORing of the escape byte.
-                output_buffer
-                    .write_byte_into_or_err(next_byte ^ 0x20)
-                    .expect("Failed to write byte");
-            } else {
-                output_buffer
-                    .write_byte_into_or_err(byte)
-                    .expect("Failed to write byte");
-            }
-        }
-
-        // Read last byte (delimiter byte).
-        if input_buffer.read_byte_or_err()? != DELIMITER {
-            panic!(
-                "Expected delimiter byte at end not found {:02x?}, start_pos: {}, end_pos: {}",
-                input_buffer.buffer, input_buffer.start_pos, input_buffer.end_pos
-            );
-            return Err(()); // Expected delimiter byte not found.
-        }
-
-        Ok(())
-    }
-}
-
-impl<'a, U: UartTransport> AsyncTransport for NrfRpcUartTransport<'a, U> {
-    type Error = U::Error;
-
-    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
-        let mut base_buffer = [0; 200];
-        let mut buffer = RpcTransportBuffer::new(&mut base_buffer);
-
-        // Encode UartFrame, then write over Uart.
-        self.encode_uart_frame(data, &mut buffer)
-            .expect("Failed to encode UART frame");
-        self.uart.write(buffer.into()).await
-    }
-
-    /// Read from Uart, decode the frame, ACK (send received checksum, no encoding needed).
-    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
-        let mut read_buffer: &mut [u8] = &mut [0; 200];
-        let output_buffer = &mut [0; 200];
-        let len = self.uart.read(read_buffer).await?;
-        read_buffer = &mut read_buffer[..len];
-
-        let mut read_output_buffer = RpcTransportBuffer::new(output_buffer);
-
-        // Decode packet from buffer.
-        let mut read_input_buffer = RpcTransportBuffer::from(read_buffer);
-
-        self.decode_uart_frame(&mut read_input_buffer, &mut read_output_buffer)
-            .expect("Failed to decode UART frame");
-
-        // Send ACK (last 2 bytes of the frame).
-        let output_read_buffer: &[u8] = read_input_buffer.into();
-        let mut ack_buffer = [0; 2];
-        ack_buffer.copy_from_slice(&output_read_buffer[output_read_buffer.len() - 2..]);
-        self.uart
-            .write(&ack_buffer)
-            .await
-            .expect("Failed to send ACK");
-
-        // Copy read/processed buffer to provided output buffer.
-        buffer[..read_output_buffer.end_pos - read_output_buffer.start_pos]
-            .copy_from_slice(read_output_buffer.into());
-        Ok(output_read_buffer.len()RpcTransportBuffer)
-    }
-}
-
-//pub trait UartTransport {
-//    type Error: TransportError;
-//
-//    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error>;
-//
-//    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error>;
-//}
-
-
-struct UartTransport<'a, T: Uart> {
-    transport: &'a T,
-}
-
-impl<'a, T: Uart> UartTransport<'a, T> {
-    pub fn new(transport: &'a T) -> Self {
-        Self { transport }
-    }
-
-    async fn write<const N: usize>(&mut self, buf: RpcTransportBuffer<'a, N>) -> Result<(), ()> {
-        unimplemented!()
-    }
-
-    async fn read<const N: usize>(
-        &mut self,
-        buf: RpcTransportBuffer<'a, N>,
-    ) -> Result<RpcTransportBuffer<'a, N>, ()> {
-        unimplemented!()
-    }
-}
-
-*/
 pub trait Uart: AsyncTransport {}
 
 pub trait UartTransportBufferStatus {}
 
-struct InProgress;
+struct EncodingInProgress;
 struct Encoded;
+struct Decoded;
+struct DecodingInProgress;
+struct UncheckedEncoded;
 
-impl UartTransportBufferStatus for InProgress {}
+impl UartTransportBufferStatus for EncodingInProgress {}
 impl UartTransportBufferStatus for Encoded {}
+impl UartTransportBufferStatus for Decoded {}
+impl UartTransportBufferStatus for DecodingInProgress {}
+impl UartTransportBufferStatus for UncheckedEncoded {}
 
 pub struct UartTransportBuffer<'a, const N: usize, S: UartTransportBufferStatus> {
     buf: TransportBuffer<'a, N>,
@@ -271,7 +106,7 @@ pub struct UartTransportBuffer<'a, const N: usize, S: UartTransportBufferStatus>
     status: core::marker::PhantomData<S>,
 }
 
-impl<'a, const N: usize> UartTransportBuffer<'a, N, InProgress> {
+impl<'a, const N: usize> UartTransportBuffer<'a, N, EncodingInProgress> {
     /// Create a new InProgress UartTransportBuffer.
     ///
     /// Initialize the CRC to 0xffff and the status to InProgress.
@@ -334,7 +169,106 @@ impl<'a, const N: usize> UartTransportBuffer<'a, N, InProgress> {
     }
 }
 
-impl<'a, const N: usize> RpcTransportBuffer<'a, N> for UartTransportBuffer<'a, N, InProgress> {
+impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, UncheckedEncoded>>
+    for UartTransportBuffer<'a, N, Decoded>
+{
+    type Error = ();
+
+    fn try_from(value: UartTransportBuffer<'a, N, UncheckedEncoded>) -> Result<Self, Self::Error> {
+        let encoding_in_progress = value.consume_opening_delimiter_byte()?;
+        encoding_in_progress.try_into()
+    }
+}
+
+impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, DecodingInProgress>>
+    for UartTransportBuffer<'a, N, Decoded>
+{
+    type Error = ();
+
+    fn try_from(
+        mut value: UartTransportBuffer<'a, N, DecodingInProgress>,
+    ) -> Result<Self, Self::Error> {
+        let mut output = [0; N];
+        let mut write_pos = 0;
+
+        // This is for all intensive purposes, a while loop until the
+        // break, but we know that we should never read more than N bytes,
+        // so to prevent a potential infinite loop, we use a for loop instead.
+        for _ in 0..N {
+            let byte = value.buf.read_byte_or_err()?;
+            if byte == ESCAPE {
+                let next_byte = value.buf.read_byte_or_err()?;
+                output[write_pos] = next_byte ^ 0x20;
+            } else if byte == DELIMITER {
+                break;
+            } else {
+                output[write_pos] = byte;
+            }
+            write_pos += 1;
+        }
+
+        let output_len = write_pos;
+
+        // Crc is stored in the last 2 bytes of the buffer. Calculate
+        // the Crc of the received data and compare it to the received CRC.
+        let mut crc = 0xffff;
+        for byte in &output[..output_len - 2] {
+            crc = crc16_ccitt(crc, *byte);
+        }
+
+        let received_crc: u16 =
+            u16::from_le_bytes([output[output_len - 2], output[output_len - 1]]);
+
+        if crc != received_crc {
+            return Err(());
+        }
+
+        let buf = value
+            .buf
+            .reset_with_new_slice(&output[..output_len - 2])
+            .expect("Failed to reset buffer");
+
+        Ok(UartTransportBuffer {
+            buf: buf,
+            crc: 0xffff,
+            status: core::marker::PhantomData,
+        })
+    }
+}
+
+impl<'a, const N: usize> From<UartTransportBuffer<'a, N, Decoded>> for &'a mut [u8] {
+    fn from(value: UartTransportBuffer<'a, N, Decoded>) -> Self {
+        value.buf.into()
+    }
+}
+
+impl<'a, const N: usize> UartTransportBuffer<'a, N, UncheckedEncoded> {
+    pub fn new(input_buffer: &'a mut [u8; N]) -> Self {
+        Self {
+            buf: TransportBuffer::from(input_buffer),
+            crc: 0xffff,
+            status: core::marker::PhantomData,
+        }
+    }
+
+    fn consume_opening_delimiter_byte(
+        mut self,
+    ) -> Result<UartTransportBuffer<'a, N, DecodingInProgress>, ()> {
+        if self.buf.read_byte_or_err()? != DELIMITER {
+            return Err(());
+        }
+
+        Ok(UartTransportBuffer {
+            buf: self.buf,
+            crc: 0xffff,
+            status: core::marker::PhantomData,
+        })
+    }
+}
+
+impl<'a, const N: usize> RpcTransportBuffer<'a, N>
+    for UartTransportBuffer<'a, N, EncodingInProgress>
+{
     fn write_slice_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
         self.write_slice_into_or_err(data)
     }
@@ -348,15 +282,18 @@ impl<'a, const N: usize> RpcTransportBuffer<'a, N> for UartTransportBuffer<'a, N
     }
 }
 
-/// Attempt to convert InProgress UartTransportBuffer to Encoded UartTransportBuffer.
-///
-/// Write checksum bytes and delimiter byte to the buffer; may fail if there is
-/// not enough space in the buffer.
-impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, InProgress>>
+impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, EncodingInProgress>>
     for UartTransportBuffer<'a, N, Encoded>
 {
     type Error = ();
-    fn try_from(mut value: UartTransportBuffer<'a, N, InProgress>) -> Result<Self, Self::Error> {
+
+    /// Attempt to convert InProgress UartTransportBuffer to Encoded UartTransportBuffer.
+    ///
+    /// Write checksum bytes and delimiter byte to the buffer; may fail if there is
+    /// not enough space in the buffer.
+    fn try_from(
+        mut value: UartTransportBuffer<'a, N, EncodingInProgress>,
+    ) -> Result<Self, Self::Error> {
         value.write_checksum_bytes()?;
         value.write_delimiter_byte()?;
 
@@ -376,7 +313,7 @@ impl<'a, const N: usize> From<UartTransportBuffer<'a, N, Encoded>> for &'a mut [
 
 /// Attempt to convert InProgress UartTransportBuffer to slice of bytes via first
 /// converting to Encoded UartTransportBuffer.
-impl<'a, const N: usize> TryInto<&'a mut [u8]> for UartTransportBuffer<'a, N, InProgress> {
+impl<'a, const N: usize> TryInto<&'a mut [u8]> for UartTransportBuffer<'a, N, EncodingInProgress> {
     type Error = ();
 
     fn try_into(self) -> Result<&'a mut [u8], Self::Error> {
@@ -436,7 +373,8 @@ mod tests {
 
          */
         let mut buf = [0; 200];
-        let mut transport_buffer = UartTransportBuffer::new(&mut buf);
+        let mut transport_buffer =
+            UartTransportBuffer::<'_, 200, EncodingInProgress>::new(&mut buf);
         transport_buffer
             .write_slice_into_or_err(&[0x80, 0x01, 0xff, 0x00, 0x00, 0x61, 0x7e, 0xf6])
             .expect("Failed to write slice");
@@ -456,8 +394,20 @@ mod tests {
 
     #[test]
     fn uart_transport_buffer_decoding() {
-        let mut buf: [u8; 13] = [
+        const EXPECTED_DECODED_BUFFER: [u8; 8] = [0x80, 0x01, 0xff, 0x00, 0x00, 0x61, 0x7e, 0xf6];
+
+        let mut encoded_buffer: [u8; 13] = [
             0x7e, 0x80, 0x01, 0xff, 0x00, 0x00, 0x61, 0x7d, 0x5e, 0xf6, 0x6d, 0x72, 0x7e,
         ];
+
+        let input_buffer: UartTransportBuffer<'_, 13, UncheckedEncoded> =
+            UartTransportBuffer::<'_, 13, UncheckedEncoded>::new(&mut encoded_buffer);
+
+        let decoded_buffer: UartTransportBuffer<'_, 13, Decoded> = input_buffer
+            .try_into()
+            .expect("Failed to convert to decoded buffer");
+
+        let decoded_buffer_slice: &mut [u8] = decoded_buffer.into();
+        assert_eq!(decoded_buffer_slice, EXPECTED_DECODED_BUFFER);
     }
 }
