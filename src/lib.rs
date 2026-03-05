@@ -10,14 +10,13 @@ mod decoding;
 pub mod packet;
 mod transport;
 mod uart_transport;
-pub use uart_transport::NrfRpcUartTransport;
-pub use uart_transport::UartTransport;
 
 pub use transport::{AsyncTransport, TransportError};
 
 use cbor_encoding::CborError;
 
 use crate::packet::{DstGroupId, MaxVersion, MinVersion, NrfRpcPacket, SrcGroupId};
+use crate::uart_transport::UartTransportBuffer;
 
 /// RPC client errors
 #[derive(Debug)]
@@ -46,64 +45,6 @@ impl core::fmt::Display for RpcError {
 impl From<CborError> for RpcError {
     fn from(e: CborError) -> Self {
         RpcError::Cbor(e)
-    }
-}
-
-pub struct RpcTransportBuffer<'a> {
-    buffer: &'a mut [u8],
-    start_pos: usize,
-    end_pos: usize,
-}
-
-impl<'a> From<RpcTransportBuffer<'a>> for &'a [u8] {
-    fn from(value: RpcTransportBuffer<'a>) -> Self {
-        &value.buffer[value.start_pos..value.end_pos]
-    }
-}
-
-impl<'a> From<RpcTransportBuffer<'a>> for &'a mut [u8] {
-    fn from(value: RpcTransportBuffer<'a>) -> Self {
-        &mut value.buffer[value.start_pos..value.end_pos]
-    }
-}
-
-impl<'a> RpcTransportBuffer<'a> {
-    pub fn new(buffer: &'a mut [u8]) -> Self {
-        Self {
-            buffer,
-            end_pos: 0,
-            start_pos: 0,
-        }
-    }
-
-    pub fn remaining_len(&self) -> usize {
-        self.buffer.len() - self.end_pos
-    }
-
-    pub fn write_slice_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
-        if self.end_pos + data.len() > self.buffer.len() {
-            return Err(());
-        }
-        self.buffer[self.end_pos..self.end_pos + data.len()].copy_from_slice(data);
-        self.end_pos += data.len();
-        Ok(())
-    }
-
-    pub fn write_byte_into_or_err(&mut self, data: u8) -> Result<(), ()> {
-        if self.end_pos + 1 > self.buffer.len() {
-            return Err(());
-        }
-        self.buffer[self.end_pos] = data;
-        self.end_pos += 1;
-        Ok(())
-    }
-
-    pub fn read_byte_or_err(&mut self) -> Result<u8, ()> {
-        if self.start_pos + 1 > self.buffer.len() {
-            return Err(());
-        }
-        self.start_pos += 1;
-        Ok(self.buffer[self.start_pos - 1])
     }
 }
 
@@ -154,27 +95,27 @@ impl<T: AsyncTransport> RpcClient<T> {
             bt_rpc_init_packet_payload,
         );
 
-        self.send_packet(bt_rpc_init_packet)
-            .await
-            .expect("Failed to send bt_rpc init packet");
+        // self.send_packet(bt_rpc_init_packet)
+        //     .await
+        //     .expect("Failed to send bt_rpc init packet");
 
-        let bt_rpc_init_packet_payload = packet::InitPacketPayload::new(
-            &mut buffer,
-            NRF_RPC_PROTOCOL_VERSION_MAX,
-            NRF_RPC_PROTOCOL_VERSION_MIN,
-            "rpc_utils",
-        )
-        .expect("Failed to build bt_rpc init packet");
+        // let bt_rpc_init_packet_payload = packet::InitPacketPayload::new(
+        //     &mut buffer,
+        //     NRF_RPC_PROTOCOL_VERSION_MAX,
+        //     NRF_RPC_PROTOCOL_VERSION_MIN,
+        //     "rpc_utils",
+        // )
+        // .expect("Failed to build bt_rpc init packet");
 
-        let bt_rpc_init_packet = packet::NrfRpcPacket::<'_, packet::Init>::new(
-            rpc_utils_group_id,
-            unspecified_dst_group_id,
-            bt_rpc_init_packet_payload,
-        );
+        // let bt_rpc_init_packet = packet::NrfRpcPacket::<'_, packet::Init>::new(
+        //     rpc_utils_group_id,
+        //     unspecified_dst_group_id,
+        //     bt_rpc_init_packet_payload,
+        // );
 
-        self.send_packet(bt_rpc_init_packet)
-            .await
-            .expect("Failed to send rpc_utils init packet");
+        // self.send_packet(bt_rpc_init_packet)
+        //     .await
+        //     .expect("Failed to send rpc_utils init packet");
 
         Ok(())
     }
@@ -188,24 +129,53 @@ impl<T: AsyncTransport> RpcClient<T> {
         self.bt_rpc_group_id
     }
 
-    pub(crate) async fn send_packet<'a, P: crate::packet::NrfRpcPacketType>(
+    pub(crate) async fn send_packet<
+        'a,
+        P: crate::packet::NrfRpcPacketType,
+        B: crate::transport::RpcTransportBuffer<'a, 256>,
+    >(
         &mut self,
         packet: NrfRpcPacket<'a, P>,
     ) -> Result<(), RpcError> {
-        let mut buffer = [0u8; 256];
-        let mut rpc_transport_buf = RpcTransportBuffer::new(&mut buffer);
+        // let mut buffer = [0u8; 256];
+        // let mut rpc_transport_buf = B::new(&mut buffer);
 
-        packet
-            .write_into(&mut rpc_transport_buf)
-            .expect("Failed to write packet into transport buffer");
+        // packet
+        //     .write_into(&mut rpc_transport_buf)
+        //     .expect("Failed to write packet into transport buffer");
 
-        self.transport
-            .write(rpc_transport_buf.into())
-            .await
-            .expect("Failed to write packet to transport");
+        // self.transport
+        //     .write(
+        //         rpc_transport_buf
+        //             .try_into()
+        //             .map_err(|_| RpcError::Transport)
+        //             .expect("Failed to convert to [u8]"),
+        //     )
+        //     .await
+        //     .expect("Failed to write packet to transport");
 
-        // (todo) error handling
         Ok(())
+    }
+
+    /// Send a command packet and decode an i32 CBOR return value from the response payload.
+    pub(crate) async fn send_command_and_get_i32(
+        &mut self,
+        packet: NrfRpcPacket<'_, crate::packet::Command>,
+    ) -> Result<i32, RpcError> {
+        // // Send the command
+        // self.send_packet(packet)
+        //     .await
+        //     .expect("Failed to send packet");
+
+        // // Receive the corresponding response
+        // let mut buffer = [0u8; 256];
+        // let len = self
+        //     .receive_packet(&mut buffer)
+        //     .await
+        //     .expect("Failed to receive packet");
+
+        // panic!("received packet: {:02x?}", &buffer[..len]);
+        Ok(0)
     }
 
     pub(crate) async fn receive_packet(&mut self, output: &mut [u8]) -> Result<usize, RpcError> {

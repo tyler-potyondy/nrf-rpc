@@ -462,14 +462,14 @@ impl<'a, P: NrfRpcPacketType> NrfRpcPacket<'a, P> {
 
     /// Provided an RpcTransportBuffer, copy the formed nrf rpc packet into the
     /// buffer. Returns Result<(), ErrorCode>.
-    pub fn write_into(self, buf: &mut crate::RpcTransportBuffer<'_>) -> Result<(), ()> {
+    pub fn write_into<const N: usize, T: crate::transport::RpcTransportBuffer<'a, N>>(
+        self,
+        buf: &mut T,
+    ) -> Result<(), ()> {
         // (todo) error code update to not be `()`
         // (todo) this requires copying. I would rather this be zero copy,
         // but alas...we could pretty easily do some unsafe shenanigans
         // to avoid copying, but for now we will just copy.
-        if buf.remaining_len() < self.payload.len() + 5 {
-            return Err(()); // Buffer too small
-        }
 
         // (todo) it would be nice to avoid this panic path.
         let (header, payload) = self.form_packet();

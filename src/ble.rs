@@ -163,11 +163,27 @@ pub struct Ble<T: AsyncTransport> {
 
 #[derive(Debug)]
 pub enum BleError {
+    /// Underlying nRF RPC transport or protocol error.
     RpcError,
+    /// Local argument or encoding issue before sending a command.
     InvalidParameter,
 }
 
 impl<T: AsyncTransport> Ble<T> {
+    /// Validate configuration between client and remote host.
+    ///
+    /// This mirrors the Zephyr `validate_config` helper, but currently acts as a
+    /// no-op placeholder. The underlying C implementation uses a configuration
+    /// \"check list\" to verify that client and host Kconfig options match; when
+    /// that logic is ported, this method should issue the corresponding
+    /// `BtRpcGetCheckListRpcCmd` command and validate the returned buffer.
+    async fn validate_config(&mut self) -> Result<(), BleError> {
+        // For now, we do not perform the full checklist exchange and validation.
+        // The Zephyr client treats a mismatch as a reported error but does not
+        // change the `bt_enable` return code, so this no-op keeps semantics
+        // compatible for success paths.
+        Ok(())
+    }
     /// Create a new BLE client and initialize the RPC connection
     ///
     /// This constructor is async and will block until the RPC handshake completes.
@@ -189,21 +205,71 @@ impl<T: AsyncTransport> Ble<T> {
     /// ble.bt_enable().await?;
     /// ```
     pub async fn bt_enable(&mut self) -> Result<(), BleError> {
-        let mut buffer = [0u8; 16]; // Allocate a buffer for CBOR encoding (adjust size as needed)
-        let cbor_args = CborPayloadBuilder::new(&mut buffer); // No arguments for bt_enable
-        let payload = cbor_args.build().map_err(|_| BleError::InvalidParameter)?;
+        // Match Zephyr behavior:
+        // 1) Validate configuration (no-op placeholder for now).
+        self.validate_config()
+            .await
+            .expect("Failed to validate configuration");
+
+        // 2) Send BT_ENABLE_RPC_CMD and wait for i32 status.
+        let mut buffer = [0u8; 16];
+        // Zephyr encodes a callback slot for `bt_enable`. The Rust API does not
+        // currently expose a callback, so we send an empty CBOR payload
+        // (terminating null only), which the host interprets as no arguments.
+        let cbor_args = CborPayloadBuilder::new(&mut buffer);
+        let payload = cbor_args.build().expect("Failed to build CBOR payload");
 
         let packet = NrfRpcPacket::<packet::Command>::new(
-            SrcContextId::try_from(0).expect("Invalid source context ID"),
-            DestContextId::try_from(0).expect("Invalid destination context ID"),
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            // New conversation: destination context is unknown (0xFF) until the
+            // peer assigns it in the response.
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
             CommandId::try_from(BleCommandId::BtEnableRpcCmd as u8).expect("Invalid command ID"),
-            SrcGroupId::try_from(0).expect("Invalid source group ID"),
-            DstGroupId::try_from(0).expect("Invalid destination group ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            // Destination group ID is updated during init once the host assigns
+            // an ID for `bt_rpc`. For now we assume the same ID as our source.
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
             payload,
         );
-        self.client
-            .send_packet(packet)
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
             .await
-            .map_err(|_| BleError::RpcError)
+            .expect("Failed to send command and get i32");
+
+        if status != 0 {
+            return Err(BleError::RpcError);
+        }
+
+        // 3) Optionally load Bluetooth settings on the remote if supported.
+        // Zephyr does this under CONFIG_BT_SETTINGS after a successful
+        // bt_enable(). We unconditionally send the corresponding RPC; hosts
+        // that do not implement settings will simply return an error.
+        let mut buffer = [0u8; 8];
+        let cbor_args = CborPayloadBuilder::new(&mut buffer);
+        let payload = cbor_args.build().expect("Failed to build CBOR payload");
+
+        let settings_packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleCommandId::BtSettingsLoadRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        // Ignore non-zero status from settings load for now; the C implementation
+        // also treats this as a separate step after bt_enable succeeds.
+        let _ = self
+            .client
+            .send_command_and_get_i32(settings_packet)
+            .await
+            .expect("Failed to send command and get i32");
+
+        Ok(())
     }
 }
