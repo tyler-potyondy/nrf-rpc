@@ -240,6 +240,7 @@ impl<T: AsyncTransport> Ble<T> {
             .expect("Failed to send command and get i32");
 
         if status != 0 {
+            panic!("bt_enable failed with status: {}", status);
             return Err(BleError::RpcError);
         }
 
@@ -247,29 +248,33 @@ impl<T: AsyncTransport> Ble<T> {
         // Zephyr does this under CONFIG_BT_SETTINGS after a successful
         // bt_enable(). We unconditionally send the corresponding RPC; hosts
         // that do not implement settings will simply return an error.
-        let mut buffer = [0u8; 8];
-        let cbor_args = CborPayloadBuilder::new(&mut buffer);
-        let payload = cbor_args.build().expect("Failed to build CBOR payload");
+        // let mut buffer = [0u8; 8];
+        // let cbor_args = CborPayloadBuilder::new(&mut buffer);
+        // let payload = cbor_args.build().expect("Failed to build CBOR payload");
 
-        let settings_packet = NrfRpcPacket::<packet::Command>::new(
-            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
-            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
-            CommandId::try_from(BleCommandId::BtSettingsLoadRpcCmd as u8)
-                .expect("Invalid command ID"),
-            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
-            DstGroupId::try_from(self.client.bt_rpc_group_id())
-                .expect("Invalid destination group ID"),
-            payload,
-        );
+        // let settings_packet = NrfRpcPacket::<packet::Command>::new(
+        //     SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+        //     DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+        //     CommandId::try_from(BleCommandId::BtSettingsLoadRpcCmd as u8)
+        //         .expect("Invalid command ID"),
+        //     SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+        //     DstGroupId::try_from(self.client.bt_rpc_group_id())
+        //         .expect("Invalid destination group ID"),
+        //     payload,
+        // );
 
         // Ignore non-zero status from settings load for now; the C implementation
         // also treats this as a separate step after bt_enable succeeds.
-        let _ = self
-            .client
-            .send_command_and_get_i32(settings_packet)
-            .await
-            .expect("Failed to send command and get i32");
+        // let _ = self
+        //     .client
+        //     .send_command_and_get_i32(settings_packet)
+        //     .await
+        //     .expect("Failed to send command and get i32");
 
+        Ok(())
+    }
+
+    pub async fn bt_begin_advertising(&mut self) -> Result<(), BleError> {
         Ok(())
     }
 }

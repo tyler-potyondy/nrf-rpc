@@ -145,7 +145,7 @@ const COMMAND_PACKET_TYPE_BASE: u8 = 0x80;
 ///       18 64: CBOR unsigned int (100)
 ///       63 62 61 72: CBOR text string ("bar")
 ///       f6: CBOR null
-pub struct NrfRpcPacket<'a, T: NrfRpcPacketType> {
+pub struct NrfRpcPacket<'a, T: NrfRpcPacketType<'a>> {
     src_context_id: Option<SrcContextId>, // Only set for command packets
     dst_context_id: DestContextId,
     command_id: CommandId,
@@ -445,7 +445,7 @@ impl<'a> NrfRpcPacket<'a, Init> {
     }
 }
 
-impl<'a, P: NrfRpcPacketType> NrfRpcPacket<'a, P> {
+impl<'a, P: NrfRpcPacketType<'a>> NrfRpcPacket<'a, P> {
     fn form_packet(self) -> ([u8; 5], &'a [u8]) {
         let type_byte = P::PACKET_TYPE as u8
             | <SrcContextId as Into<u8>>::into(self.src_context_id.unwrap_or(SrcContextId(0)));
@@ -462,7 +462,7 @@ impl<'a, P: NrfRpcPacketType> NrfRpcPacket<'a, P> {
 
     /// Provided an RpcTransportBuffer, copy the formed nrf rpc packet into the
     /// buffer. Returns Result<(), ErrorCode>.
-    pub fn write_into<const N: usize, T: crate::transport::RpcTransportBuffer<'a, N>>(
+    pub fn write_into<'b, const N: usize, T: crate::transport::RpcTxTransportBuffer<'b, N>>(
         self,
         buf: &mut T,
     ) -> Result<(), ()> {
@@ -479,7 +479,7 @@ impl<'a, P: NrfRpcPacketType> NrfRpcPacket<'a, P> {
     }
 }
 
-pub trait NrfRpcPacketType {
+pub trait NrfRpcPacketType<'a> {
     const PACKET_TYPE: TypeField;
 }
 
@@ -495,36 +495,44 @@ pub enum TypeField {
 impl TryFrom<u8> for TypeField {
     type Error = ();
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        unimplemented!()
+        match value {
+            EVENT_PACKET_TYPE => Ok(TypeField::Event),
+            RESPONSE_PACKET_TYPE => Ok(TypeField::Response),
+            EVENT_ACK_PACKET_TYPE => Ok(TypeField::EventAck),
+            ERROR_REPORT_PACKET_TYPE => Ok(TypeField::ErrorReport),
+            INIT_PACKET_TYPE => Ok(TypeField::Init),
+            COMMAND_PACKET_TYPE_BASE => Ok(TypeField::Command),
+            _ => Err(()),
+        }
     }
 }
 
 pub struct Event;
-impl NrfRpcPacketType for Event {
+impl<'a> NrfRpcPacketType<'a> for Event {
     const PACKET_TYPE: TypeField = TypeField::Event;
 }
 
 pub struct Response;
-impl NrfRpcPacketType for Response {
+impl<'a> NrfRpcPacketType<'a> for Response {
     const PACKET_TYPE: TypeField = TypeField::Response;
 }
 
 pub struct EventAck;
-impl NrfRpcPacketType for EventAck {
+impl<'a> NrfRpcPacketType<'a> for EventAck {
     const PACKET_TYPE: TypeField = TypeField::EventAck;
 }
 
 pub struct ErrorReport;
-impl NrfRpcPacketType for ErrorReport {
+impl<'a> NrfRpcPacketType<'a> for ErrorReport {
     const PACKET_TYPE: TypeField = TypeField::ErrorReport;
 }
 
 pub struct Init;
-impl NrfRpcPacketType for Init {
+impl<'a> NrfRpcPacketType<'a> for Init {
     const PACKET_TYPE: TypeField = TypeField::Init;
 }
 
 pub struct Command;
-impl NrfRpcPacketType for Command {
+impl<'a> NrfRpcPacketType<'a> for Command {
     const PACKET_TYPE: TypeField = TypeField::Command;
 }

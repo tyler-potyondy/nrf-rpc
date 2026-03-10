@@ -76,7 +76,7 @@
 
 use crate::{
     AsyncTransport, TransportError,
-    transport::{RpcTransportBuffer, TransportBuffer},
+    transport::{RpcRxTransportBuffer, RpcTxTransportBuffer, TransportBuffer},
 };
 
 /// nRF RPC UART Escape Byte.
@@ -94,13 +94,61 @@ struct Decoded;
 struct DecodingInProgress;
 struct UncheckedEncoded;
 
+pub struct UartTxTransport<'a, const N: usize> {
+    inner: UartTransportBuffer<'a, N, EncodingInProgress>,
+}
+
+impl<'a, const N: usize> RpcTxTransportBuffer<'a, N> for UartTxTransport<'a, N> {
+    fn write_slice_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
+        self.inner.write_slice_into_or_err(data)
+    }
+
+    fn write_byte_into_or_err(&mut self, data: u8) -> Result<(), ()> {
+        self.inner.write_byte_into_or_err(data)
+    }
+
+    fn new(buffer: &'a mut [u8; N]) -> Self {
+        Self {
+            inner: UartTransportBuffer::<'_, N, EncodingInProgress>::new(buffer),
+        }
+    }
+}
+
+impl<'a, const N: usize> TryFrom<UartTxTransport<'a, N>> for &'a mut [u8] {
+    type Error = ();
+
+    fn try_from(value: UartTxTransport<'a, N>) -> Result<Self, Self::Error> {
+        value.inner.try_into()
+    }
+}
+
+pub struct UartRxTransport<'a, const N: usize> {
+    inner: UartTransportBuffer<'a, N, UncheckedEncoded>,
+}
+
+impl<'a, const N: usize> RpcRxTransportBuffer<'a, N> for UartRxTransport<'a, N> {
+    fn new(buffer: &'a mut [u8; N]) -> Self {
+        Self {
+            inner: UartTransportBuffer::<'_, N, UncheckedEncoded>::new(buffer),
+        }
+    }
+}
+
+impl<'a, const N: usize> TryFrom<UartRxTransport<'a, N>> for &'a mut [u8] {
+    type Error = ();
+
+    fn try_from(value: UartRxTransport<'a, N>) -> Result<Self, Self::Error> {
+        value.inner.try_into()
+    }
+}
+
 impl UartTransportBufferStatus for EncodingInProgress {}
 impl UartTransportBufferStatus for Encoded {}
 impl UartTransportBufferStatus for Decoded {}
 impl UartTransportBufferStatus for DecodingInProgress {}
 impl UartTransportBufferStatus for UncheckedEncoded {}
 
-pub struct UartTransportBuffer<'a, const N: usize, S: UartTransportBufferStatus> {
+struct UartTransportBuffer<'a, const N: usize, S: UartTransportBufferStatus> {
     buf: TransportBuffer<'a, N>,
     crc: u16,
     status: core::marker::PhantomData<S>,
@@ -266,7 +314,7 @@ impl<'a, const N: usize> UartTransportBuffer<'a, N, UncheckedEncoded> {
     }
 }
 
-impl<'a, const N: usize> RpcTransportBuffer<'a, N>
+impl<'a, const N: usize> RpcTxTransportBuffer<'a, N>
     for UartTransportBuffer<'a, N, EncodingInProgress>
 {
     fn write_slice_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
@@ -319,6 +367,15 @@ impl<'a, const N: usize> TryInto<&'a mut [u8]> for UartTransportBuffer<'a, N, En
     fn try_into(self) -> Result<&'a mut [u8], Self::Error> {
         let ready_buffer: UartTransportBuffer<'a, N, Encoded> = self.try_into()?;
         Ok(ready_buffer.into())
+    }
+}
+
+impl<'a, const N: usize> TryInto<&'a mut [u8]> for UartTransportBuffer<'a, N, UncheckedEncoded> {
+    type Error = ();
+
+    fn try_into(self) -> Result<&'a mut [u8], Self::Error> {
+        let decoded_buffer: UartTransportBuffer<'a, N, Decoded> = self.try_into()?;
+        Ok(decoded_buffer.into())
     }
 }
 

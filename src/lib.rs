@@ -8,15 +8,17 @@ mod cbor_encoding;
 mod decoding;
 #[doc(hidden)]
 pub mod packet;
-mod transport;
-mod uart_transport;
+pub mod transport;
+pub mod uart_transport;
 
-pub use transport::{AsyncTransport, TransportError};
+pub use transport::{AsyncTransport, RpcRxTransportBuffer, RpcTxTransportBuffer, TransportError};
 
 use cbor_encoding::CborError;
 
-use crate::packet::{DstGroupId, MaxVersion, MinVersion, NrfRpcPacket, SrcGroupId};
-use crate::uart_transport::UartTransportBuffer;
+use crate::{
+    decoding::{ParsedNrfRpcPacket, ParsedPayload},
+    packet::{DstGroupId, MaxVersion, MinVersion, NrfRpcPacket, SrcGroupId},
+};
 
 /// RPC client errors
 #[derive(Debug)]
@@ -95,27 +97,27 @@ impl<T: AsyncTransport> RpcClient<T> {
             bt_rpc_init_packet_payload,
         );
 
-        // self.send_packet(bt_rpc_init_packet)
-        //     .await
-        //     .expect("Failed to send bt_rpc init packet");
+        self.send_packet(bt_rpc_init_packet)
+            .await
+            .expect("Failed to send bt_rpc init packet");
 
-        // let bt_rpc_init_packet_payload = packet::InitPacketPayload::new(
-        //     &mut buffer,
-        //     NRF_RPC_PROTOCOL_VERSION_MAX,
-        //     NRF_RPC_PROTOCOL_VERSION_MIN,
-        //     "rpc_utils",
-        // )
-        // .expect("Failed to build bt_rpc init packet");
+        let bt_rpc_init_packet_payload = packet::InitPacketPayload::new(
+            &mut buffer,
+            NRF_RPC_PROTOCOL_VERSION_MAX,
+            NRF_RPC_PROTOCOL_VERSION_MIN,
+            "rpc_utils",
+        )
+        .expect("Failed to build bt_rpc init packet");
 
-        // let bt_rpc_init_packet = packet::NrfRpcPacket::<'_, packet::Init>::new(
-        //     rpc_utils_group_id,
-        //     unspecified_dst_group_id,
-        //     bt_rpc_init_packet_payload,
-        // );
+        let bt_rpc_init_packet = packet::NrfRpcPacket::<'_, packet::Init>::new(
+            rpc_utils_group_id,
+            unspecified_dst_group_id,
+            bt_rpc_init_packet_payload,
+        );
 
-        // self.send_packet(bt_rpc_init_packet)
-        //     .await
-        //     .expect("Failed to send rpc_utils init packet");
+        self.send_packet(bt_rpc_init_packet)
+            .await
+            .expect("Failed to send rpc_utils init packet");
 
         Ok(())
     }
@@ -129,30 +131,26 @@ impl<T: AsyncTransport> RpcClient<T> {
         self.bt_rpc_group_id
     }
 
-    pub(crate) async fn send_packet<
-        'a,
-        P: crate::packet::NrfRpcPacketType,
-        B: crate::transport::RpcTransportBuffer<'a, 256>,
-    >(
+    pub(crate) async fn send_packet<'a, P: crate::packet::NrfRpcPacketType<'a>>(
         &mut self,
         packet: NrfRpcPacket<'a, P>,
     ) -> Result<(), RpcError> {
-        // let mut buffer = [0u8; 256];
-        // let mut rpc_transport_buf = B::new(&mut buffer);
+        let mut buffer = [0u8; 256];
+        let mut rpc_transport_buf = T::TxTransportBuffer::<'_, 256>::new(&mut buffer);
 
-        // packet
-        //     .write_into(&mut rpc_transport_buf)
-        //     .expect("Failed to write packet into transport buffer");
+        packet
+            .write_into(&mut rpc_transport_buf)
+            .expect("Failed to write packet into transport buffer");
 
-        // self.transport
-        //     .write(
-        //         rpc_transport_buf
-        //             .try_into()
-        //             .map_err(|_| RpcError::Transport)
-        //             .expect("Failed to convert to [u8]"),
-        //     )
-        //     .await
-        //     .expect("Failed to write packet to transport");
+        self.transport
+            .write(
+                rpc_transport_buf
+                    .try_into()
+                    .map_err(|_| RpcError::Transport)
+                    .expect("Failed to convert to [u8]"),
+            )
+            .await
+            .expect("Failed to write packet to transport");
 
         Ok(())
     }
@@ -162,27 +160,45 @@ impl<T: AsyncTransport> RpcClient<T> {
         &mut self,
         packet: NrfRpcPacket<'_, crate::packet::Command>,
     ) -> Result<i32, RpcError> {
-        // // Send the command
-        // self.send_packet(packet)
-        //     .await
-        //     .expect("Failed to send packet");
+        // Send the command
+        self.send_packet(packet)
+            .await
+            .expect("Failed to send packet");
 
-        // // Receive the corresponding response
-        // let mut buffer = [0u8; 256];
-        // let len = self
-        //     .receive_packet(&mut buffer)
-        //     .await
-        //     .expect("Failed to receive packet");
-
-        // panic!("received packet: {:02x?}", &buffer[..len]);
+        // Receive the corresponding response
+        let mut buffer = [0u8; 256];
+        let recv_packet = self
+            .receive_packet(&mut buffer)
+            .await
+            .expect("Failed to receive packet");
         Ok(0)
+        // if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+        //     return Ok(self
+        //         .decode_i32_response(payload.into())
+        //         .expect("Failed to decode i32 response"));
+        // } else {
+        //     panic!("Expected CBOR payload, got something else");
+        // }
     }
 
-    pub(crate) async fn receive_packet(&mut self, output: &mut [u8]) -> Result<usize, RpcError> {
-        self.transport
+    pub(crate) async fn receive_packet<'a>(
+        &mut self,
+        output: &'a mut [u8; 256],
+    ) -> Result<ParsedNrfRpcPacket<'a>, RpcError> {
+        // Get the raw packet from the "wire"
+        let len = self
+            .transport
             .read(output)
             .await
+            .expect("Failed to receive packet");
+
+        let transport_parse = T::RxTransportBuffer::<'_, 256>::new(output);
+        let parsed_transport = transport_parse
+            .try_into()
             .map_err(|_| RpcError::Transport)
+            .expect("Failed to convert to [u8]");
+
+        Ok(ParsedNrfRpcPacket::try_from(parsed_transport).expect("Failed to parse packet"))
     }
 
     // pub(crate) async fn send_command(&mut self, packet: &[u8]) -> Result<i32, RpcError> {

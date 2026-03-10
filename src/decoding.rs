@@ -6,17 +6,17 @@ use crate::packet::{
 
 use crate::cbor_encoding::CBorPayload;
 
-struct ParsedNrfRpcPacket<'a> {
-    packet_type: TypeField,
-    src_context_id: SrcContextId,
-    command_id: CommandId,
-    dst_context_id: DestContextId,
-    src_group_id: SrcGroupId,
-    dst_group_id: DstGroupId,
-    payload: ParsedPayload<'a>,
+pub struct ParsedNrfRpcPacket<'a> {
+    pub packet_type: TypeField,
+    pub src_context_id: SrcContextId,
+    pub command_id: CommandId,
+    pub dst_context_id: DestContextId,
+    pub src_group_id: SrcGroupId,
+    pub dst_group_id: DstGroupId,
+    pub payload: ParsedPayload<'a>,
 }
 
-enum ParsedPayload<'a> {
+pub enum ParsedPayload<'a> {
     Cbor(CBorPayload<'a>),
     ErrorCode(u32),
     InitPacketPayload(MinVersion, MaxVersion, &'a str),

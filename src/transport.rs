@@ -8,6 +8,8 @@
 
 use core::fmt;
 
+use crate::decoding::ParsedNrfRpcPacket;
+
 /// Error trait for transport implementations
 pub trait TransportError: fmt::Debug {}
 
@@ -42,7 +44,8 @@ pub trait TransportError: fmt::Debug {}
 pub trait AsyncTransport {
     /// Error type for this transport
     type Error: TransportError;
-    type TransportBuffer<'a, const N: usize>: RpcTransportBuffer<'a, N>;
+    type TxTransportBuffer<'a, const N: usize>: RpcTxTransportBuffer<'a, N>;
+    type RxTransportBuffer<'a, const N: usize>: RpcRxTransportBuffer<'a, N>;
 
     /// Write bytes to the transport
     ///
@@ -155,8 +158,12 @@ impl<'a, const N: usize> TransportBuffer<'a, N> {
     }
 }
 
-pub trait RpcTransportBuffer<'a, const N: usize>: TryInto<&'a mut [u8]> {
+pub trait RpcTxTransportBuffer<'a, const N: usize>: TryInto<&'a mut [u8]> {
     fn write_slice_into_or_err(&mut self, data: &[u8]) -> Result<(), ()>;
     fn write_byte_into_or_err(&mut self, data: u8) -> Result<(), ()>;
+    fn new(buffer: &'a mut [u8; N]) -> Self;
+}
+
+pub trait RpcRxTransportBuffer<'a, const N: usize>: TryInto<&'a mut [u8]> {
     fn new(buffer: &'a mut [u8; N]) -> Self;
 }
