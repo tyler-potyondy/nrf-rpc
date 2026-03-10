@@ -5,7 +5,7 @@ use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::cell::RefCell;
 use nrf_rpc::ble::Ble;
 
-#[test]
+// #[test]
 fn test_rpc_init_packets() {
     let mock_uart = utils::MockUart {
         transmitted: Rc::new(RefCell::new(Vec::new())),

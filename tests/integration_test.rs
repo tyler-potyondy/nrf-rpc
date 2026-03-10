@@ -7,7 +7,7 @@
 //! rx/tx to a unix socket. The test here then provides a mock transport layer that
 //! directs client writes to this socket and polls for responses on the socket.
 
-use nrf_rpc::{NrfRpcUartTransport, RpcClient, TransportError, UartTransport};
+use nrf_rpc::{AsyncTransport, RpcClient, TransportError, ble::Ble, uart_transport::Uart};
 use serial_test::serial;
 use std::collections::HashSet;
 use std::io::{BufRead, Read, Write};
@@ -133,10 +133,14 @@ impl MockUart {
     }
 }
 
-impl UartTransport for MockUart {
-    type Error = MockError;
+impl Uart for MockUart {}
 
-    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+impl AsyncTransport for MockUart {
+    type Error = MockError;
+    type TxTransportBuffer<'a, const N: usize> = nrf_rpc::uart_transport::UartTxTransport<'a, N>;
+    type RxTransportBuffer<'a, const N: usize> = nrf_rpc::uart_transport::UartRxTransport<'a, N>;
+
+    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         // Log the packet being sent
         println!(
             "MockUart: Sending {} bytes to {}: {:02X?}",
@@ -491,7 +495,7 @@ fn test_client_can_send_packet() {
     // socket exists and is listening before the MockUart attempts to connect.
     let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
 
-    let _client = client_test_helper(&mut uart);
+    let _client = client_test_helper(uart);
     processes.search_stdout_for_strings(HashSet::from(["<dbg> nrf_rpc_uart: >>> RX packet"]));
 }
 
@@ -511,17 +515,56 @@ fn test_client_group_handshake() {
     println!("Starting client group handshake test...");
 
     let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
-    let _client = client_test_helper(&mut uart);
+    let _client = client_test_helper(uart);
     processes.search_stdout_for_strings(HashSet::from([
         "NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0",
         "NRF_RPC: Found corresponding local group. Remote id: 1, Local id: 1",
     ]));
 }
 
-fn client_test_helper<'a>(uart: &'a mut MockUart) -> RpcClient<NrfRpcUartTransport<'a, MockUart>> {
+#[test]
+#[serial]
+fn test_bt_enable_initializes_bluetooth() {
+    println!("Starting bt_enable integration test...");
+
+    let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
+
+    // Create BLE client over the same UART transport used by other tests.
+    let mut ble = block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
+
+    // Call bt_enable and expect it to succeed end-to-end against the Zephyr server.
+    block_on(ble.bt_enable()).expect("bt_enable RPC failed");
+
+    // Verify that the Zephyr side reports Bluetooth initialization and settings load.
+    processes.search_stdout_for_strings(HashSet::from([
+        "bt_hci_core: HW Platform: Nordic Semiconductor",
+    ]));
+}
+
+#[test]
+#[serial]
+fn test_bt_begin_advertising() {
+    println!("Starting bt_begin_advertising integration test...");
+
+    let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
+
+    // Create BLE client over the same UART transport used by other tests.
+    let mut ble = block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
+
+    // Call bt_enable and expect it to succeed end-to-end against the Zephyr server.
+    block_on(ble.bt_enable()).expect("bt_enable RPC failed");
+
+    block_on(ble.bt_begin_advertising()).expect("bt_begin_advertising RPC failed");
+
+    processes.search_stdout_for_strings(HashSet::from([
+        "bt_hci_core: HW Platform: Nordic Semiconductor",
+        "INordic_",
+    ]));
+}
+
+fn client_test_helper(uart: MockUart) -> RpcClient<MockUart> {
     std::thread::sleep(Duration::from_secs(1));
-    let transport = NrfRpcUartTransport::new(uart);
-    let mut client: RpcClient<NrfRpcUartTransport<'a, MockUart>> = RpcClient::new(transport);
+    let mut client: RpcClient<MockUart> = RpcClient::new(uart);
     block_on(client.init()).expect("Failed to initialize client");
 
     client
