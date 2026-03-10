@@ -4,6 +4,7 @@
 extern crate std;
 
 pub mod ble;
+mod ble_types;
 mod cbor_encoding;
 mod decoding;
 #[doc(hidden)]
@@ -167,10 +168,10 @@ impl<T: AsyncTransport> RpcClient<T> {
 
         // Receive the corresponding response
         let mut buffer = [0u8; 256];
-        let recv_packet = self
-            .receive_packet(&mut buffer)
-            .await
-            .expect("Failed to receive packet");
+        //let recv_packet = self
+        //    .receive_packet(&mut buffer)
+        //    .await
+        //    .expect("Failed to receive packet");
         Ok(0)
         // if let ParsedPayload::Cbor(payload) = recv_packet.payload {
         //     return Ok(self

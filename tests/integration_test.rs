@@ -311,6 +311,7 @@ pub mod TestProcessInfra {
 
         pub fn search_stdout_for_strings(&mut self, search_strings: HashSet<&str>) {
             let mut expected_index = 0;
+            let mut missing_strings = search_strings.clone();
             for _ in 0..500 {
                 if expected_index >= search_strings.len() {
                     println!("Found all expected outputs!");
@@ -322,6 +323,7 @@ pub mod TestProcessInfra {
                     println!("{}", line);
                     for search_string in search_strings.iter() {
                         if line.contains(search_string) {
+                            missing_strings.remove(search_string);
                             println!("Found expected line: {}", line);
                             expected_index += 1;
                             break;
@@ -331,9 +333,10 @@ pub mod TestProcessInfra {
             }
 
             panic!(
-                "{}/{} expected outputs found",
+                "{}/{} expected outputs found. Missing: {:?}",
                 expected_index,
-                search_strings.len()
+                search_strings.len(),
+                missing_strings
             );
         }
 
@@ -554,11 +557,11 @@ fn test_bt_begin_advertising() {
     // Call bt_enable and expect it to succeed end-to-end against the Zephyr server.
     block_on(ble.bt_enable()).expect("bt_enable RPC failed");
 
-    block_on(ble.bt_begin_advertising()).expect("bt_begin_advertising RPC failed");
+    block_on(ble.bt_le_adv_start()).expect("bt_le_adv_start RPC failed");
 
     processes.search_stdout_for_strings(HashSet::from([
         "bt_hci_core: HW Platform: Nordic Semiconductor",
-        "INordic_",
+        "JINordic",
     ]));
 }
 

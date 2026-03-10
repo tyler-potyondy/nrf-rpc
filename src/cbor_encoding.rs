@@ -216,9 +216,33 @@ impl<'a> CborPayloadBuilder<'a> {
         Ok(self)
     }
 
-    pub fn encode_uint(mut self, value: u64) -> Result<Self, CborError> {
+    pub fn encode_uint_64(mut self, value: u64) -> Result<Self, CborError> {
         self.encode(|encoder| {
             encoder.u64(value)?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?;
+        Ok(self)
+    }
+
+    pub fn encode_uint_32(mut self, value: u32) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.u32(value)?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?;
+        Ok(self)
+    }
+
+    pub fn encode_int_32(mut self, value: i32) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.i32(value)?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?;
+        Ok(self)
+    }
+
+    pub fn encode_uint_8(mut self, value: u8) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.u8(value)?;
             Ok(()) // Ensure closure returns Result<(), CborError>
         })?;
         Ok(self)
@@ -227,6 +251,14 @@ impl<'a> CborPayloadBuilder<'a> {
     pub fn cbor_int(mut self, value: i64) -> Result<Self, CborError> {
         self.encode(|encoder| {
             encoder.i64(value)?;
+            Ok(()) // Ensure closure returns Result<(), CborError>
+        })?;
+        Ok(self)
+    }
+
+    pub fn encode_uint_16(mut self, value: u16) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.u16(value)?;
             Ok(()) // Ensure closure returns Result<(), CborError>
         })?;
         Ok(self)

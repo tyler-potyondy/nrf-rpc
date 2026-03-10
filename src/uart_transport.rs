@@ -211,8 +211,20 @@ impl<'a, const N: usize> UartTransportBuffer<'a, N, EncodingInProgress> {
     /// May fail if there is not enough space in the buffer.
     fn write_checksum_bytes(&mut self) -> Result<(), ()> {
         let checksum = self.crc.to_le_bytes();
-        self.buf.write_byte_into_or_err(checksum[0])?;
-        self.buf.write_byte_into_or_err(checksum[1])?;
+        let previous_crc = self.crc;
+
+        self.write_byte_into_or_err(checksum[0])?;
+        self.write_byte_into_or_err(checksum[1])?;
+
+        // Note, using the write_byte_into_or_err method
+        // results in the crc being updated with the
+        // checksum bytes. We store/restore the original
+        // value here. This is not strictly necessary, but
+        // hopefully avoids a potential footgun. In a multithread
+        // context, this save/restore may also result in a race
+        // condition.
+        self.crc = previous_crc;
+
         Ok(())
     }
 }
@@ -268,6 +280,11 @@ impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, DecodingInProgress>>
             u16::from_le_bytes([output[output_len - 2], output[output_len - 1]]);
 
         if crc != received_crc {
+            // todo: remove panic and add error handling
+            panic!(
+                "CRC mismatch: expected 0x{:04x}, got 0x{:04x}",
+                crc, received_crc
+            );
             return Err(());
         }
 
@@ -413,6 +430,23 @@ mod tests {
         assert_eq!(crc, 0x726d);
     }
 
+    /// CRC regression for `bt_le_adv_start` packet from Zephyr sniff.
+    #[test]
+    fn test_crc16_bt_le_adv_start_packet() {
+        let data: [u8; 36] = [
+            0x80, 0x04, 0xff, 0x00, 0x00, 0x18, 0x20, 0x00, 0x00, 0x00, 0x03, 0x18, 0xa0, 0x18,
+            0xf0, 0xf6, 0x01, 0x01, 0x01, 0x41, 0x06, 0x01, 0x09, 0x0a, 0x4a, 0x49, 0x4e, 0x6f,
+            0x72, 0x64, 0x69, 0x63, 0x5f, 0x50, 0x53, 0xf6,
+        ];
+
+        let mut crc = 0xffff;
+        for byte in data {
+            crc = crc16_ccitt(crc, byte);
+        }
+
+        assert_eq!(crc, 0x447e);
+    }
+
     #[test]
     fn uart_transport_buffer_encoding() {
         /*
@@ -465,6 +499,29 @@ mod tests {
             .expect("Failed to convert to decoded buffer");
 
         let decoded_buffer_slice: &mut [u8] = decoded_buffer.into();
+        assert_eq!(decoded_buffer_slice, EXPECTED_DECODED_BUFFER);
+    }
+
+    #[test]
+    fn uart_transport_buffer_decoding_crc_with_delimiter() {
+        let mut input_buffer: [u8; 41] = [
+            0x7E, 0x80, 0x04, 0xff, 0x00, 0x00, 0x18, 0x20, 0x00, 0x00, 0x00, 0x03, 0x18, 0xA0,
+            0x18, 0xF0, 0xF6, 0x01, 0x01, 0x01, 0x41, 0x06, 0x01, 0x09, 0x0A, 0x4A, 0x49, 0x4E,
+            0x6F, 0x72, 0x64, 0x69, 0x63, 0x5F, 0x50, 0x53, 0xF6, 0x7d, 0x5e, 0x44, 0x7E,
+        ];
+
+        let input_buffer: UartTransportBuffer<'_, 41, UncheckedEncoded> =
+            UartTransportBuffer::<'_, 41, UncheckedEncoded>::new(&mut input_buffer);
+
+        let decoded_buffer_slice: &mut [u8] = input_buffer
+            .try_into()
+            .expect("Failed to convert to decoded buffer");
+
+        const EXPECTED_DECODED_BUFFER: [u8; 36] = [
+            0x80, 0x04, 0xff, 0x00, 0x00, 0x18, 0x20, 0x00, 0x00, 0x00, 0x03, 0x18, 0xA0, 0x18,
+            0xF0, 0xF6, 0x01, 0x01, 0x01, 0x41, 0x06, 0x01, 0x09, 0x0A, 0x4A, 0x49, 0x4E, 0x6F,
+            0x72, 0x64, 0x69, 0x63, 0x5F, 0x50, 0x53, 0xF6,
+        ];
         assert_eq!(decoded_buffer_slice, EXPECTED_DECODED_BUFFER);
     }
 }
