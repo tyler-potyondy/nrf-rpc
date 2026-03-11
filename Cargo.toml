@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 minicbor = { version = "0.25", default-features = false }
-code_gen_helpers = { path = "code_gen_helpers" }
 
 [dev-dependencies]
 serial_test = "3"
