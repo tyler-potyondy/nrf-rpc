@@ -347,8 +347,15 @@ pub mod TestProcessInfra {
         }
 
         fn kill(&mut self) {
-            self.rpc_server.kill().ok();
             self.socat.kill().ok();
+
+            // Kill the entire process group of the RPC server to ensure all its children are also killed.
+            let pid = self.rpc_server.id();
+            std::process::Command::new("kill")
+                .args(["-9", &format!("-{}", pid)])
+                .output()
+                .ok();
+            self.rpc_server.wait().ok();
         }
 
         pub fn get_rpc_server(&mut self) -> &mut ZephyrServerProcess {
@@ -375,6 +382,7 @@ use TestProcessInfra::TestProcesses;
 /// This outputs verbose output we capture and will process later to determine
 /// if the client/server are working properly.
 fn run_zephyr_rpc_server_exe() -> (TestProcesses, MockUart) {
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     let mut rpc_server = Command::new("sh")
@@ -382,6 +390,9 @@ fn run_zephyr_rpc_server_exe() -> (TestProcesses, MockUart) {
         .arg(ZEPHY_RPC_SERVER_RUN_SCRIPT)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Put the script and all its children into a new process group
+        // so we can kill them all at once with kill
+        .process_group(0)
         .spawn()
         .expect("Failed to start Zephyr RPC server");
 
