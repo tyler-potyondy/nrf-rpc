@@ -385,7 +385,8 @@ fn run_zephyr_rpc_server_exe() -> (TestProcesses, MockUart) {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let mut rpc_server = Command::new("sh")
+    let mut rpc_server = Command::new("setsid")
+        .arg("sh")
         .current_dir(TEST_DIRECTORY_PATH) // Set working directory
         .arg(ZEPHY_RPC_SERVER_RUN_SCRIPT)
         .stdout(Stdio::piped())
