@@ -347,6 +347,7 @@ pub mod TestProcessInfra {
         }
 
         fn kill(&mut self) {
+            println!("Killing test processes");
             self.socat.kill().ok();
 
             // Kill the entire process group of the RPC server to ensure all its children are also killed.
@@ -355,7 +356,6 @@ pub mod TestProcessInfra {
                 .args(["-9", &format!("-{}", pid)])
                 .output()
                 .ok();
-            self.rpc_server.wait().ok();
         }
 
         pub fn get_rpc_server(&mut self) -> &mut ZephyrServerProcess {
