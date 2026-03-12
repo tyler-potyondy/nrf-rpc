@@ -1,0 +1,77 @@
+name: Devcontainer cargo test
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  cargo-test-suite:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Setup swap space
+        run: |
+          # Remove existing swapfile if present
+          sudo swapoff /swapfile 2>/dev/null || true
+          sudo rm -f /swapfile
+
+          # Create new swap
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Get nrf submodule SHA for cache key
+        id: nrf-sha
+        run: echo "sha=$(git submodule status tests/external/nrf | awk '{print $1}' | tr -d '+-')" >> $GITHUB_OUTPUT
+
+      - name: Cache Zephyr/BabbleSim build artifacts
+        uses: actions/cache@v4
+        id: cache-external
+        with:
+          path: tests/external
+          key: tests-external-${{ steps.nrf-sha.outputs.sha }}
+
+      - name: Build devcontainer image
+        run: |
+          docker build \
+            --file .devcontainer/Dockerfile \
+            --platform linux/amd64 \
+            --tag nrf-rpc-dev \
+            .
+
+      - name: Run cargo test inside container
+        run: |
+          docker run --rm \
+            --memory=6g \
+            --memory-swap=14g \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            nrf-rpc-dev \
+            bash -lc "git config --system --add safe.directory '*' && cd tests && ./zephyr_setup.sh && cargo test --lib --workspace && cargo test --test integration_test -- --test-threads=1"
+
+  cargo-compile-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cargo check (compile test)
+        run: cargo check --workspace --all-targets
+
+
