@@ -1,7 +1,7 @@
 #!/bin/bash
 # BabbleSim test setup for nRF RPC UART
 
-set -e
+#set -e
 
 # Confirm currently in directory tests/external
 if [ "$(basename "$PWD")" != "tests" ]; then
@@ -17,35 +17,20 @@ export LD_LIBRARY_PATH=${BSIM_OUT_PATH}/lib:${LD_LIBRARY_PATH}
 # Simulation ID (use same for all devices in the simulation)
 SIM_ID="nrf_rpc_test"
 
-# Device number
-DEVICE_NUM=0
-
 # Clean up old lock files
 rm -rf /tmp/bs_${USER}/${SIM_ID} 2>/dev/null
+
+pkill ${SIM_ID} 
 
 echo "Starting BabbleSim PHY simulator..."
 cd ${BSIM_OUT_PATH}/bin
 ./bs_2G4_phy_v1 -s=${SIM_ID} -D=2 -sim_length=86400e6 &
-PHY_PID=$!
-
-# Wait for PHY to start
-sleep 1
-
-# Start time monitor to advance simulation time (suppress output)
-echo "Starting time monitor device..."
-./bs_device_time_monitor -s=${SIM_ID} -d=1 -interval=10000000 >/dev/null 2>&1 &
-MONITOR_PID=$!
-
-sleep 0.5
 
 # (TODO) May need to make this architecture agnostic.
 echo "Starting nRF RPC server with BabbleSim..."
-cd ../../../build/zephyr_server_app/server/zephyr 
 
 echo ""
 echo "=== BabbleSim Running ===" 
-echo "PHY PID: ${PHY_PID}"
-echo "Monitor PID: ${MONITOR_PID}"
 echo "Simulation ID: ${SIM_ID}"
 echo "Simulation length: 86400 seconds (24 hours simulated, ~39 seconds real time at 2200x speed)"
 echo ""
@@ -57,4 +42,7 @@ echo "Starting device (Press Ctrl+C to stop)..."
 echo ""
 
 # Run in foreground to see all output
-./zephyr.exe -s=${SIM_ID} -d=${DEVICE_NUM} -uart0_pty -uart_pty_pollT=1000
+./zephyr_rpc_server_app -s=${SIM_ID} -d=0 -uart0_pty -uart_pty_pollT=1000 &
+
+rm -f cgm_peripheral_sample.log
+./cgm_peripheral_sample -s=${SIM_ID} -d=1 > cgm_peripheral_sample.log 2>&1 &

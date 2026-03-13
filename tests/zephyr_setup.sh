@@ -93,5 +93,24 @@ fi
 
 echo $PWD
 
+# Build ble rpc server.
 west build -b nrf52_bsim -p always --build-dir build/zephyr_server_app nrf/samples/nrf_rpc/protocols_serialization/server -S ble
+
+# Build the cgm peripheral sample.
+west build -b nrf52_bsim -p always --build-dir build/cgm_peripheral_sample nrf/samples/bluetooth/peripheral_cgms
+
+# Confirm we are in the external directory.
+if [ "$(basename "$PWD")" != "external" ]; then
+    log_error "Error: This script must be run from the external directory."
+    exit 1
+fi
+
+
+# Copy all build artifacts to external/tools/bsim/bin
+cp -r build/zephyr_server_app/server/zephyr/zephyr.exe tools/bsim/bin/zephyr_rpc_server_app
+cp -r build/cgm_peripheral_sample/peripheral_cgms/zephyr/zephyr.exe tools/bsim/bin/cgm_peripheral_sample
+
+# Copy the BabbleSim binaries to external/tools/bsim/bin
+cp -r tools/bsim/bin/bs_2G4_phy_v1 tools/bsim/bin/bs_2G4_phy_v1
+cp -r tools/bsim/bin/bs_device_time_monitor tools/bsim/bin/bs_device_time_monitor
 
