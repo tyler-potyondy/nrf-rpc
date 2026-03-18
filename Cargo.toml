@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "nrf-rpc-codegen"]
+
 [package]
 name = "nrf-rpc"
 version = "0.1.0"
@@ -5,6 +8,7 @@ edition = "2024"
 
 [dependencies]
 minicbor = { version = "0.25", default-features = false }
+nrf-rpc-codegen = { path = "nrf-rpc-codegen" }
 
 [dev-dependencies]
 serial_test = "3"

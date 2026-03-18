@@ -141,6 +141,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
+name = "lang-c"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "720e6492b795d1f6838eb2e51879ec3073be745a20e52c32a241b80b3c8ed998"
+
+[[package]]
 name = "libc"
 version = "0.2.182"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -180,7 +186,18 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "minicbor",
+ "nrf-rpc-codegen",
  "serial_test",
+]
+
+[[package]]
+name = "nrf-rpc-codegen"
+version = "0.1.0"
+dependencies = [
+ "lang-c",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

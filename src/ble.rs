@@ -211,6 +211,14 @@ enum BleHostCommandId {
     BtGattSubscribeParamsSubscribeRpcCmd,
 }
 
+use crate as nrf_rpc;
+use nrf_rpc_codegen::rpc_from_c;
+
+rpc_from_c!(
+    cmd = "BtEnableRpcCmd",
+    sig = "int bt_enable(bt_ready_cb_t cb)"
+);
+
 /// BLE RPC client
 ///
 /// Encapsulates an RPC client for Bluetooth Low Energy operations.
@@ -255,6 +263,7 @@ impl<T: AsyncTransport> Ble<T> {
         Ok(Self { client })
     }
 
+    /*
     /// Enable Bluetooth (TODO) add zephyr doc comments HERE
     ///
     /// # Example
@@ -330,7 +339,7 @@ impl<T: AsyncTransport> Ble<T> {
         //     .expect("Failed to send command and get i32");
 
         Ok(())
-    }
+    }*/
 
     pub async fn bt_le_adv_start(&mut self) -> Result<(), BleError> {
         // Mirror the Zephyr bt_le_adv_start RPC encoding.
@@ -559,4 +568,26 @@ struct bt_le_scan_param {
      * Set zero to use same as LE 1M PHY scan window.
      */
     pub window_coded: u16,
+}
+
+// ============================================================================
+// Code Generation Test
+// ============================================================================
+
+#[cfg(test)]
+mod codegen_tests {
+    use crate as nrf_rpc;
+    use nrf_rpc_codegen::rpc_from_c;
+
+    struct MockClient {}
+
+    #[test]
+    fn test() {
+        let _client = MockClient {};
+
+        rpc_from_c!(
+            cmd = "BtEnableRpcCmd",
+            sig = "int bt_enable(bt_ready_cb_t cb)"
+        );
+    }
 }

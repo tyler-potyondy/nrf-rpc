@@ -12,7 +12,7 @@ use serial_test::serial;
 use std::collections::HashSet;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::process::{ChildStderr, ChildStdout};
+use std::os::unix::thread;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 /// Mock error type
@@ -94,12 +94,12 @@ impl MockUart {
                     }
                     Ok(n) => {
                         // Useful for debugging socket/UART rx
-                        // println!(
-                        //     "MockUart RX thread: Received {} bytes from {}: {:02X?}",
-                        //     n,
-                        //     socat_socket_path_clone,
-                        //     &buf[..n]
-                        // );
+                        println!(
+                            "MockUart RX thread: Received {} bytes from {}: {:02X?}",
+                            n,
+                            socat_socket_path_clone,
+                            &buf[..n]
+                        );
                         let mut rx = rx_buffer_clone.lock().unwrap();
                         rx.extend_from_slice(&buf[..n]);
                     }
@@ -114,6 +114,7 @@ impl MockUart {
                         break;
                     }
                 }
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         });
 
@@ -194,11 +195,11 @@ impl AsyncTransport for MockUart {
                     rx.drain(0..n);
 
                     // Useful for debugging socket/UART rx
-                    // println!(
-                    //     "MockUart: Delivering {} bytes from RX buffer to client: {:02X?}",
-                    //     n,
-                    //     &buffer[..n]
-                    // );
+                    println!(
+                        "MockUart: Delivering {} bytes from RX buffer to client: {:02X?}",
+                        n,
+                        &buffer[..n]
+                    );
 
                     return Ok(n);
                 }
