@@ -13,7 +13,6 @@ use std::collections::HashSet;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::thread;
-use std::process::{ChildStderr, ChildStdout};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 

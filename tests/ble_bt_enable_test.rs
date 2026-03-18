@@ -155,7 +155,7 @@ fn test_bt_enable_uses_enable_command_and_parses_status() {
     }
 
     // bt_enable should complete successfully given a zero status response.
-    block_on(ble.bt_enable(None)).expect("bt_enable RPC failed");
+    block_on(bt_enable(ble)).expect("bt_enable RPC failed");
 
     // Ensure we sent exactly one command frame and performed at least one read.
     let state = state_handle.lock().unwrap();
