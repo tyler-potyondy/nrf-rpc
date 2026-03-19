@@ -350,12 +350,26 @@ pub mod TestProcessInfra {
             println!("Killing test processes");
             self.socat.kill().ok();
 
-            // Kill the entire process group of the RPC server to ensure all its children are also killed.
+            // Kill the RPC server process and its children.
+            // First try graceful termination, then force kill if needed.
             let pid = self.rpc_server.id();
-            std::process::Command::new("kill")
-                .args(["-9", &format!("-{}", pid)])
-                .output()
-                .ok();
+            
+            // Try SIGTERM first (graceful shutdown)
+            let _ = std::process::Command::new("kill")
+                .args([&format!("{}", pid)])
+                .output();
+            
+            // Give it a moment to terminate gracefully
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            
+            // Force kill the specific process if still running
+            let _ = self.rpc_server.kill();
+            
+            // Also try to kill any child processes specifically
+            // Using pkill with parent PID is safer than negative process group
+            let _ = std::process::Command::new("pkill")
+                .args(["-P", &format!("{}", pid)])
+                .output();
         }
 
         pub fn get_rpc_server(&mut self) -> &mut ZephyrServerProcess {
