@@ -1,7 +1,14 @@
 #!/bin/bash
 # BabbleSim test setup for nRF RPC UART
 
-#set -e
+set -e
+
+# Simulation ID provided as arg, fail if not provided
+if [ -z "$1" ]; then
+    echo "Usage: $0 <SIMULATION_ID>"
+    exit 1
+fi
+SIM_ID=$1
 
 # Confirm currently in directory tests/external
 if [ "$(basename "$PWD")" != "tests" ]; then
@@ -14,13 +21,19 @@ export BSIM_OUT_PATH=external/tools/bsim
 export BSIM_COMPONENTS_PATH=${BSIM_OUT_PATH}/components
 export LD_LIBRARY_PATH=${BSIM_OUT_PATH}/lib:${LD_LIBRARY_PATH}
 
-# Simulation ID (use same for all devices in the simulation)
-SIM_ID="nrf_rpc_test"
 
 # Clean up old lock files
-rm -rf /tmp/bs_${USER}/${SIM_ID} 2>/dev/null
+echo "Cleaning up old processes..."
+pkill -f "bs_2G4_phy_v1 -s=${SIM_ID}" || true
+pkill -f "zephyr_rpc_server_app -s=${SIM_ID}" || true
+pkill -f "cgm_peripheral_sample -s=${SIM_ID}" || true
+sleep 0.5
+pkill -9 -f "bs_2G4_phy_v1 -s=${SIM_ID}" || true
+pkill -9 -f "zephyr_rpc_server_app -s=${SIM_ID}" || true
+pkill -9 -f "cgm_peripheral_sample -s=${SIM_ID}" || true
 
-pkill ${SIM_ID} 
+echo "Cleaning up old socket files..."
+rm -rf /tmp/bs_${USER}/${SIM_ID} 2>/dev/null
 
 echo "Starting BabbleSim PHY simulator..."
 cd ${BSIM_OUT_PATH}/bin

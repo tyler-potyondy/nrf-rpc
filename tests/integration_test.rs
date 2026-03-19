@@ -11,6 +11,7 @@ use nrf_rpc::{AsyncTransport, RpcClient, TransportError, ble::Ble, uart_transpor
 use serial_test::serial;
 use std::collections::HashSet;
 use std::io::{BufRead, Read, Write};
+use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -37,8 +38,7 @@ struct MockUart {
 }
 
 impl MockUart {
-    fn new() -> Self {
-        let socat_socket_path = SOCAT_SOCKET_PATH.to_string();
+    fn new(socat_socket_path: String) -> Self {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(5);
         let mut last_err: Option<std::io::Error> = None;
@@ -264,7 +264,6 @@ fn block_on<F: core::future::Future>(mut f: F) -> F::Output {
 
 const ZEPHY_RPC_SERVER_RUN_SCRIPT: &str = "run_bsim.sh";
 const TEST_DIRECTORY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/");
-const SOCAT_SOCKET_PATH: &str = "/tmp/nrf_rpc_socket";
 
 use std::io::BufReader;
 pub mod TestProcessInfra {
@@ -353,18 +352,18 @@ pub mod TestProcessInfra {
             // Kill the RPC server process and its children.
             // First try graceful termination, then force kill if needed.
             let pid = self.rpc_server.id();
-            
+
             // Try SIGTERM first (graceful shutdown)
             let _ = std::process::Command::new("kill")
                 .args([&format!("{}", pid)])
                 .output();
-            
+
             // Give it a moment to terminate gracefully
             std::thread::sleep(std::time::Duration::from_millis(100));
-            
+
             // Force kill the specific process if still running
             let _ = self.rpc_server.kill();
-            
+
             // Also try to kill any child processes specifically
             // Using pkill with parent PID is safer than negative process group
             let _ = std::process::Command::new("pkill")
@@ -390,12 +389,42 @@ pub mod TestProcessInfra {
 
 use TestProcessInfra::TestProcesses;
 
+/// Helper function to read stdout and stderr from a process
+fn read_process_output(
+    stdout: Option<&mut std::process::ChildStdout>,
+    stderr: Option<&mut std::process::ChildStderr>,
+) -> (String, String) {
+    let mut stdout_content = String::new();
+    let mut stderr_content = String::new();
+
+    if let Some(stdout) = stdout {
+        let _ = stdout.read_to_string(&mut stdout_content);
+    }
+
+    if let Some(stderr) = stderr {
+        let _ = stderr.read_to_string(&mut stderr_content);
+    }
+
+    (stdout_content, stderr_content)
+}
+
+/// Helper function to print process diagnostics
+fn print_process_diagnostics(stdout: &str, stderr: &str) {
+    if !stdout.is_empty() {
+        eprintln!("=== RPC Server STDOUT ===");
+        eprintln!("{}", stdout);
+    }
+    eprintln!("=== RPC Server STDERR ===");
+    eprintln!("{}", stderr);
+    eprintln!("=========================");
+}
+
 /// Run the Zephyr RPC server script that launches the Babble Simulator
 /// and runs the RPC Server app.
 ///
 /// This outputs verbose output we capture and will process later to determine
 /// if the client/server are working properly.
-fn run_zephyr_rpc_server_exe() -> (TestProcesses, MockUart) {
+fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockUart) {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -403,6 +432,7 @@ fn run_zephyr_rpc_server_exe() -> (TestProcesses, MockUart) {
         .arg("sh")
         .current_dir(TEST_DIRECTORY_PATH) // Set working directory
         .arg(ZEPHY_RPC_SERVER_RUN_SCRIPT)
+        .arg(test_name)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Put the script and all its children into a new process group
@@ -413,24 +443,11 @@ fn run_zephyr_rpc_server_exe() -> (TestProcesses, MockUart) {
 
     // See if process failed to start.
     if let Some(status) = rpc_server.try_wait().expect("Failed to wait on process") {
-        // Read stdout and stderr to help diagnose the issue
-        let mut stdout_content = String::new();
-        let mut stderr_content = String::new();
-        
-        if let Some(mut stdout) = rpc_server.stdout.take() {
-            let _ = stdout.read_to_string(&mut stdout_content);
-        }
-        
-        if let Some(mut stderr) = rpc_server.stderr.take() {
-            let _ = stderr.read_to_string(&mut stderr_content);
-        }
-        
-        eprintln!("=== RPC Server STDOUT ===");
-        eprintln!("{}", stdout_content);
-        eprintln!("=== RPC Server STDERR ===");
-        eprintln!("{}", stderr_content);
-        eprintln!("=========================");
-        
+        let (stdout_content, stderr_content) =
+            read_process_output(rpc_server.stdout.as_mut(), rpc_server.stderr.as_mut());
+
+        print_process_diagnostics(&stdout_content, &stderr_content);
+
         panic!(
             "RPC server process exited immediately with status: {}",
             status
@@ -442,23 +459,43 @@ fn run_zephyr_rpc_server_exe() -> (TestProcesses, MockUart) {
     let reader = BufReader::new(rpc_server_stdout);
     let mut lines = reader.lines();
     let interface = loop {
-        let line = lines.next().expect("Failed to read stdout");
-        if let Ok(line) = line {
-            if line.contains("UART 0 (UARTE0) connected to pseudotty") {
-                // Extract the interface name from the line
-                if let Some(start) = line.find("/dev/pts/") {
-                    let interface = line[start..].trim().to_string();
-                    println!("Found interface: {}", interface);
-                    break interface;
+        match lines.next() {
+            Some(Ok(line)) => {
+                println!("RPC Server: {}", line);
+                if line.contains("UART 0 (UARTE0) connected to pseudotty") {
+                    // Extract the interface name from the line
+                    if let Some(start) = line.find("/dev/pts/") {
+                        let interface = line[start..].trim().to_string();
+                        println!("Found interface: {}", interface);
+                        break interface;
+                    }
                 }
             }
-        } else {
-            panic!("EOF or error before finding interface");
+            Some(Err(e)) => {
+                panic!("Error reading stdout: {}", e);
+            }
+            None => {
+                // Process has closed stdout - check if it exited
+                if let Ok(Some(status)) = rpc_server.try_wait() {
+                    let (_, stderr_content) = read_process_output(None, rpc_server.stderr.as_mut());
+
+                    print_process_diagnostics("", &stderr_content);
+
+                    panic!(
+                        "RPC server exited with status {} before outputting interface",
+                        status
+                    );
+                } else {
+                    panic!(
+                        "RPC server stdout closed but process still running - no interface found"
+                    );
+                }
+            }
         }
     };
 
-    let socat = create_socat_socket(&interface, SOCAT_SOCKET_PATH);
-    let uart = MockUart::new();
+    let socat = create_socat_socket(&interface, test_name);
+    let uart = MockUart::new(test_name.to_string());
     (TestProcesses::new(rpc_server, lines, socat), uart)
 }
 
@@ -493,54 +530,32 @@ fn create_socat_socket(pty_port: &str, socket_path: &str) -> std::process::Child
 }
 
 #[test]
-#[serial]
 /// Basic functionality test to launch server. No client interactions for this test.
 fn test_zephyr_rpc_server() {
+    const TEST_NAME: &str = "test_zephyr_rpc_server";
     println!("Starting Zephyr RPC server test to test that the server launches properly.");
 
     const TEST_DURATION: u64 = 10; // seconds
 
-    let (mut processes, _) = run_zephyr_rpc_server_exe();
+    let (mut processes, _) = run_zephyr_rpc_server_exe(TEST_NAME);
     let expected = [
         "<inf> nrf_ps_server: Initializing RPC server",
         "<dbg> NRF_RPC: Done initializing nRF RPC module",
         "<inf> nrf_ps_server: RPC server ready",
     ];
 
-    let start = Instant::now();
-    let mut expected_index = 0;
-
-    // Read 500 lines of stdout from the server, looking for the expected outputs.
-    for _ in 0..500 {
-        if expected_index >= expected.len() {
-            println!("Found all expected outputs!");
-            return; // Test passed
-        }
-
-        let line = processes.get_rpc_server_stdout_line(Duration::from_millis(500));
-        if let Some(line) = line {
-            if expected_index < expected.len() && line.contains(expected[expected_index]) {
-                expected_index += 1;
-            }
-        }
-    }
-
-    panic!(
-        "Found {}/{} expected outputs",
-        expected_index,
-        expected.len()
-    );
+    processes.search_stdout_for_strings(HashSet::from(expected));
 }
 
 #[test]
-#[serial]
 /// Test the client can send a packet and receive an ACK.
 fn test_client_can_send_packet() {
+    const TEST_NAME: &str = "test_client_can_send_packet";
     println!("Starting client can send packet test...");
 
     // First start the Zephyr RPC server and socat bridge so that the UNIX
     // socket exists and is listening before the MockUart attempts to connect.
-    let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
+    let (mut processes, mut uart) = run_zephyr_rpc_server_exe(TEST_NAME);
 
     let _client = client_test_helper(uart);
     processes.search_stdout_for_strings(HashSet::from(["<dbg> nrf_rpc_uart: >>> RX packet"]));
@@ -557,11 +572,11 @@ fn test_client_can_send_packet() {
 // }
 
 #[test]
-#[serial]
 fn test_client_group_handshake() {
     println!("Starting client group handshake test...");
+    const TEST_NAME: &str = "test_client_group_handshake";
 
-    let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
+    let (mut processes, mut uart) = run_zephyr_rpc_server_exe(TEST_NAME);
     let _client = client_test_helper(uart);
     processes.search_stdout_for_strings(HashSet::from([
         "NRF_RPC: Found corresponding local group. Remote id: 0, Local id: 0",
@@ -570,11 +585,11 @@ fn test_client_group_handshake() {
 }
 
 #[test]
-#[serial]
 fn test_bt_enable_initializes_bluetooth() {
     println!("Starting bt_enable integration test...");
+    const TEST_NAME: &str = "test_bt_enable_initializes_bluetooth";
 
-    let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
+    let (mut processes, mut uart) = run_zephyr_rpc_server_exe(TEST_NAME);
 
     // Create BLE client over the same UART transport used by other tests.
     let mut ble = block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
@@ -589,11 +604,11 @@ fn test_bt_enable_initializes_bluetooth() {
 }
 
 #[test]
-#[serial]
 fn test_bt_begin_advertising() {
     println!("Starting bt_begin_advertising integration test...");
+    const TEST_NAME: &str = "test_bt_begin_advertising";
 
-    let (mut processes, mut uart) = run_zephyr_rpc_server_exe();
+    let (mut processes, mut uart) = run_zephyr_rpc_server_exe(TEST_NAME);
 
     // Create BLE client over the same UART transport used by other tests.
     let mut ble = block_on(Ble::new(uart)).expect("Failed to initialize BLE client");

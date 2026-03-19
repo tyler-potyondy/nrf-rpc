@@ -10,11 +10,12 @@
   "runArgs": [
     "--platform=linux/amd64"
   ],
-  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postCreateCommand": "git config --global --add safe.directory /workspace/tests/external/nrf && bash .devcontainer/post-create.sh",
   "customizations": {
     "vscode": {
       "extensions": [
-        "rust-lang.rust-analyzer"
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb"
       ]
     }
   },
