@@ -413,6 +413,24 @@ fn run_zephyr_rpc_server_exe() -> (TestProcesses, MockUart) {
 
     // See if process failed to start.
     if let Some(status) = rpc_server.try_wait().expect("Failed to wait on process") {
+        // Read stdout and stderr to help diagnose the issue
+        let mut stdout_content = String::new();
+        let mut stderr_content = String::new();
+        
+        if let Some(mut stdout) = rpc_server.stdout.take() {
+            let _ = stdout.read_to_string(&mut stdout_content);
+        }
+        
+        if let Some(mut stderr) = rpc_server.stderr.take() {
+            let _ = stderr.read_to_string(&mut stderr_content);
+        }
+        
+        eprintln!("=== RPC Server STDOUT ===");
+        eprintln!("{}", stdout_content);
+        eprintln!("=== RPC Server STDERR ===");
+        eprintln!("{}", stderr_content);
+        eprintln!("=========================");
+        
         panic!(
             "RPC server process exited immediately with status: {}",
             status
