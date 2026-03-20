@@ -14,13 +14,24 @@ export BSIM_OUT_PATH=external/tools/bsim
 export BSIM_COMPONENTS_PATH=${BSIM_OUT_PATH}/components
 export LD_LIBRARY_PATH=${BSIM_OUT_PATH}/lib:${LD_LIBRARY_PATH}
 
-# Simulation ID (use same for all devices in the simulation)
-SIM_ID="nrf_rpc_test"
+# Simulation ID provided as arg or exit
+SIM_ID="$1"
+if [ -z "$SIM_ID" ]; then
+    echo "Error: Simulation ID must be provided as the first argument."
+    exit 1
+fi
+
+pkill -f "bs_2G4_phy_v1 -s=${SIM_ID}" 2>/dev/null || true
+pkill -f "zephyr_rpc_server_app -s=${SIM_ID}" 2>/dev/null || true
+pkill -f "cgm_peripheral_sample -s=${SIM_ID}" 2>/dev/null || true
+
+sleep 0.5
+pkill -9 "bs_2G4_phy_v1 -s=${SIM_ID}" 2>/dev/null || true
+pkill -9 "zephyr_rpc_server_app -s=${SIM_ID}" 2>/dev/null || true
+pkill -9 "cgm_peripheral_sample -s=${SIM_ID}" 2>/dev/null || true
 
 # Clean up old lock files
 rm -rf /tmp/bs_${USER}/${SIM_ID} 2>/dev/null
-
-pkill ${SIM_ID} 
 
 echo "Starting BabbleSim PHY simulator..."
 cd ${BSIM_OUT_PATH}/bin
