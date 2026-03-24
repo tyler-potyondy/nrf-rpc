@@ -168,18 +168,18 @@ impl<T: AsyncTransport> RpcClient<T> {
 
         // Receive the corresponding response
         let mut buffer = [0u8; 256];
-        //let recv_packet = self
-        //    .receive_packet(&mut buffer)
-        //    .await
-        //    .expect("Failed to receive packet");
-        Ok(0)
-        // if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-        //     return Ok(self
-        //         .decode_i32_response(payload.into())
-        //         .expect("Failed to decode i32 response"));
-        // } else {
-        //     panic!("Expected CBOR payload, got something else");
-        // }
+        let recv_packet = self
+            .receive_packet(&mut buffer)
+            .await
+            .expect("Failed to receive packet");
+
+        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+            return Ok(self
+                .decode_i32_response(payload.into())
+                .expect("Failed to decode i32 response"));
+        } else {
+            panic!("Expected CBOR payload, got something else");
+        }
     }
 
     pub(crate) async fn receive_packet<'a>(
