@@ -168,29 +168,20 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 3;
-        for i in 0..retry_count {
-            // Wait before retrying (except for the first attempt)
-            if i > 0 {
-                self.transport.delay_ms(100).await;
-            }
+        // Receive the corresponding response
+        let mut buffer = [0u8; 256];
+        let recv_packet = self
+            .receive_packet(&mut buffer)
+            .await
+            .expect("Failed to receive packet");
 
-            // Receive the corresponding response
-            let mut buffer = [0u8; 256];
-            let recv_packet_list = self.receive_packet(&mut buffer).await?;
-
-            for recv_packet in recv_packet_list.into_iter().flatten() {
-                if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                    return Ok(self
-                        .decode_i32_response(payload.into())
-                        .expect("Failed to decode i32 response"));
-                } else {
-                    // continue
-                }
-            }
+        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+            return Ok(self
+                .decode_i32_response(payload.into())
+                .expect("Failed to decode i32 response"));
+        } else {
+            panic!("Expected CBOR payload, got something else");
         }
-
-        Err(RpcError::NoResponse)
     }
 
     pub(crate) async fn receive_packet<'a>(

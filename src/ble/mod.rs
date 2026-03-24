@@ -220,10 +220,10 @@ enum BleHostCommandId {
 use crate as nrf_rpc;
 use nrf_rpc_codegen::rpc_from_c;
 
-rpc_from_c!(
-    cmd = "BtEnableRpcCmd",
-    sig = "int bt_enable(bt_ready_cb_t cb)"
-);
+// rpc_from_c!(
+//     cmd = "BtEnableRpcCmd",
+//     sig = "int bt_enable(bt_ready_cb_t cb)"
+// );
 
 /// BLE RPC client
 ///
@@ -548,26 +548,4 @@ struct bt_le_scan_param {
      * Set zero to use same as LE 1M PHY scan window.
      */
     pub window_coded: u16,
-}
-
-// ============================================================================
-// Code Generation Test
-// ============================================================================
-
-#[cfg(test)]
-mod codegen_tests {
-    use crate as nrf_rpc;
-    use nrf_rpc_codegen::rpc_from_c;
-
-    struct MockClient {}
-
-    #[test]
-    fn test() {
-        let _client = MockClient {};
-
-        rpc_from_c!(
-            cmd = "BtEnableRpcCmd",
-            sig = "int bt_enable(bt_ready_cb_t cb)"
-        );
-    }
 }

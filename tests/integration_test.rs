@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::thread;
+use std::process::{ChildStderr, ChildStdout};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -543,8 +544,7 @@ fn test_bt_enable_initializes_bluetooth() {
         embassy_futures::block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
 
     // Call bt_enable and expect it to succeed end-to-end against the Zephyr server.
-    // embassy_futures::block_on(ble.bt_enable(5)).expect("bt_enable RPC failed");
-    embassy_futures::block_on(ble.bt_enable(None));
+    block_on(ble.bt_enable(5)).expect("bt_enable RPC failed");
 
     // Verify at least server startup logs are present.
     processes.search_stdout_for_strings(HashSet::from([
@@ -563,10 +563,7 @@ fn test_bt_begin_advertising() {
         embassy_futures::block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
 
     // Call bt_enable and expect it to succeed end-to-end against the Zephyr server.
-    let bt_enable_res = embassy_futures::block_on(ble.bt_enable(None));
-    if bt_enable_res.is_err() {
-        println!("[WARNING] bt_enable failed: {:?}", bt_enable_res.err());
-    }
+    block_on(ble.bt_enable()).expect("bt_enable RPC failed");
 
     let bt_le_adv_start_res = embassy_futures::block_on(ble.bt_le_adv_start());
     if bt_le_adv_start_res.is_err() {

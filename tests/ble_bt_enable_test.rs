@@ -103,23 +103,6 @@ fn block_on<F: core::future::Future>(mut f: F) -> F::Output {
     }
 }
 
-/// CRC16-CCITT calculation matching the UART transport implementation.
-/// Polynomial 0x8408, seed 0xffff, reflected input/output.
-fn calculate_crc16_ccitt(data: &[u8]) -> u16 {
-    let mut crc = 0xffffu16;
-    for &byte in data {
-        crc ^= byte as u16;
-        for _ in 0..8 {
-            if (crc & 1) != 0 {
-                crc = (crc >> 1) ^ 0x8408u16;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    crc
-}
-
 #[test]
 fn test_bt_enable_uses_enable_command_and_parses_status() {
     // Minimal nRF RPC response frame for bt_enable:
@@ -155,7 +138,7 @@ fn test_bt_enable_uses_enable_command_and_parses_status() {
     }
 
     // bt_enable should complete successfully given a zero status response.
-    block_on(bt_enable(ble)).expect("bt_enable RPC failed");
+    block_on(ble.bt_enable(5)).expect("bt_enable RPC failed");
 
     // Ensure we sent exactly one command frame and performed at least one read.
     let state = state_handle.lock().unwrap();
