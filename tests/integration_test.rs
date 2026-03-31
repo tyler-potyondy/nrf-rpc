@@ -544,7 +544,7 @@ fn test_bt_enable_initializes_bluetooth() {
         embassy_futures::block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
 
     // Call bt_enable and expect it to succeed end-to-end against the Zephyr server.
-    block_on(ble.bt_enable(5)).expect("bt_enable RPC failed");
+    embassy_futures::block_on(ble.bt_enable(5)).expect("bt_enable RPC failed");
 
     // Verify at least server startup logs are present.
     processes.search_stdout_for_strings(HashSet::from([
@@ -559,11 +559,10 @@ fn test_bt_begin_advertising() {
     let (mut processes, uart) = run_zephyr_rpc_server_exe("test_bt_begin_advertising");
 
     // Create BLE client over the same UART transport used by other tests.
-    let mut ble =
-        embassy_futures::block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
+    let mut ble = block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
 
     // Call bt_enable and expect it to succeed end-to-end against the Zephyr server.
-    block_on(ble.bt_enable()).expect("bt_enable RPC failed");
+    embassy_futures::block_on(ble.bt_enable()).expect("bt_enable RPC failed");
 
     let bt_le_adv_start_res = embassy_futures::block_on(ble.bt_le_adv_start());
     if bt_le_adv_start_res.is_err() {
