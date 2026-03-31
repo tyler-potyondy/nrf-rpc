@@ -230,39 +230,6 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Minimal async runtime for tests - just polls futures to completion
-fn block_on<F: core::future::Future>(mut f: F) -> F::Output {
-    use std::pin::Pin;
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-    // Create a no-op waker
-    unsafe fn clone(_: *const ()) -> RawWaker {
-        RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-    unsafe fn wake(_: *const ()) {}
-    unsafe fn wake_by_ref(_: *const ()) {}
-    unsafe fn drop(_: *const ()) {}
-
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
-
-    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
-    let mut context = Context::from_waker(&waker);
-
-    // Pin the future
-    let mut pinned = unsafe { Pin::new_unchecked(&mut f) };
-
-    // Poll until complete
-    loop {
-        match pinned.as_mut().poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => {
-                // In real async runtime this would yield, but our futures complete immediately
-                panic!("Future didn't complete immediately - tests need a real async runtime");
-            }
-        }
-    }
-}
-
 const ZEPHY_RPC_SERVER_RUN_SCRIPT: &str = "run_bsim.sh";
 const TEST_DIRECTORY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/");
 
@@ -589,10 +556,11 @@ fn test_bt_enable_initializes_bluetooth() {
         run_zephyr_rpc_server_exe("test_bt_enable_initializes_bluetooth");
 
     // Create BLE client over the same UART transport used by other tests.
-    let mut ble = block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
+    let mut ble =
+        embassy_futures::block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
 
     // Call bt_enable and expect it to succeed end-to-end against the Zephyr server.
-    block_on(ble.bt_enable()).expect("bt_enable RPC failed");
+    embassy_futures::block_on(ble.bt_enable()).expect("bt_enable RPC failed");
 
     // Verify that the Zephyr side reports Bluetooth initialization and settings load.
     processes.search_stdout_for_strings(HashSet::from([
@@ -607,12 +575,13 @@ fn test_bt_begin_advertising() {
     let (mut processes, mut uart) = run_zephyr_rpc_server_exe("test_bt_begin_advertising");
 
     // Create BLE client over the same UART transport used by other tests.
-    let mut ble = block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
+    let mut ble =
+        embassy_futures::block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
 
     // Call bt_enable and expect it to succeed end-to-end against the Zephyr server.
-    block_on(ble.bt_enable()).expect("bt_enable RPC failed");
+    embassy_futures::block_on(ble.bt_enable()).expect("bt_enable RPC failed");
 
-    block_on(ble.bt_le_adv_start()).expect("bt_le_adv_start RPC failed");
+    embassy_futures::block_on(ble.bt_le_adv_start()).expect("bt_le_adv_start RPC failed");
 
     processes.search_stdout_for_strings(HashSet::from([
         "bt_hci_core: HW Platform: Nordic Semiconductor",
@@ -623,7 +592,7 @@ fn test_bt_begin_advertising() {
 fn client_test_helper(uart: MockUart) -> RpcClient<MockUart> {
     std::thread::sleep(Duration::from_secs(1));
     let mut client: RpcClient<MockUart> = RpcClient::new(uart);
-    block_on(client.init()).expect("Failed to initialize client");
+    embassy_futures::block_on(client.init()).expect("Failed to initialize client");
 
     client
 }
