@@ -99,17 +99,43 @@ fn block_on<F: core::future::Future>(mut f: F) -> F::Output {
     }
 }
 
+/// CRC16-CCITT calculation matching the UART transport implementation.
+/// Polynomial 0x8408, seed 0xffff, reflected input/output.
+fn calculate_crc16_ccitt(data: &[u8]) -> u16 {
+    let mut crc = 0xffffu16;
+    for &byte in data {
+        crc ^= byte as u16;
+        for _ in 0..8 {
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ 0x8408u16;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    crc
+}
+
 #[test]
 fn test_bt_enable_uses_enable_command_and_parses_status() {
     // Minimal nRF RPC response frame for bt_enable:
-    // header (5 bytes) + CBOR-encoded status (0)
+    // Raw packet (before UART framing):
     // 01: Type = response
     // FF: cmd/evt/cnt unused for responses
     // 00: dst ctx id
     // 00: src group id
     // 00: dst group id
-    // 00: CBOR 0
-    let response = vec![0x01, 0xFF, 0x00, 0x00, 0x00, 0x00];
+    // 00: CBOR 0 (success status)
+
+    // Calculate CRC16-CCITT for the raw packet
+    let raw_packet = vec![0x01, 0xFF, 0x00, 0x00, 0x00, 0x00];
+    let crc = calculate_crc16_ccitt(&raw_packet);
+
+    // UART framing: 0x7e (delimiter) + raw_packet + crc (2 bytes, LE) + 0x7e (delimiter)
+    let mut response = vec![0x7e]; // opening delimiter
+    response.extend_from_slice(&raw_packet);
+    response.extend_from_slice(&crc.to_le_bytes()); // CRC in little-endian
+    response.push(0x7e); // closing delimiter
 
     let uart = DummyUart::new(response);
     let state_handle = uart.state();
