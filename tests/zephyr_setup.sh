@@ -39,9 +39,10 @@ if [ "$(basename "$PWD")" != "tests" ]; then
     exit 1
 fi
 
-# Delete everything except .gitignore
+# Delete everything including .gitignore files (but keep the top-level .gitignore)
 log_info "Cleaning up existing external directory..."
-find external -mindepth 1 -not -name '.gitignore' -delete 2>/dev/null || true
+find external -mindepth 2 -delete 2>/dev/null || true
+find external -mindepth 1 -maxdepth 1 -not -name '.gitignore' -delete 2>/dev/null || true
 
 log_info "Setting up zephyr submodule and building server app executable..."
 git submodule update --init external/nrf
@@ -102,7 +103,7 @@ ls
 
 
 # confirm we are on branch bsim-test
-current_branch=$(git -C nrf rev-parse --abrev-ref HEAD)
+current_branch=$(git -C nrf rev-parse --abbrev-ref HEAD)
 if [ "$current_branch" != "bsim-test" ]; then
     git -C nrf checkout bsim-test
 fi
@@ -127,7 +128,5 @@ fi
 cp -r build/zephyr_server_app/server/zephyr/zephyr.exe tools/bsim/bin/zephyr_rpc_server_app
 cp -r build/cgm_peripheral_sample/peripheral_cgms/zephyr/zephyr.exe tools/bsim/bin/cgm_peripheral_sample
 
-# Copy the BabbleSim binaries to external/tools/bsim/bin
-cp -r tools/bsim/bin/bs_2G4_phy_v1 tools/bsim/bin/bs_2G4_phy_v1
-cp -r tools/bsim/bin/bs_device_time_monitor tools/bsim/bin/bs_device_time_monitor
+log_success "Build artifacts copied to tools/bsim/bin/"
 
