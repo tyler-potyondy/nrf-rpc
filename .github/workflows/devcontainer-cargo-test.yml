@@ -154,15 +154,23 @@ jobs:
           
           echo "=== Binary check complete ==="
 
-      - name: Run cargo test
+      - name: Build devcontainer image for tests
         run: |
-          # Set library path for BabbleSim
-          export LD_LIBRARY_PATH="$PWD/tests/external/tools/bsim/lib:$LD_LIBRARY_PATH"
-          export BSIM_OUT_PATH="$PWD/tests/external/tools/bsim"
-          
-          echo "Running tests with BabbleSim from: $BSIM_OUT_PATH"
-          cargo test --lib --workspace 
-          cargo test --test integration_test
+          docker build \
+            --file .devcontainer/Dockerfile \
+            --platform linux/amd64 \
+            --tag nrf-rpc-dev \
+            .
+
+      - name: Run cargo test in container
+        run: |
+          docker run --rm \
+            --memory=6g \
+            --memory-swap=14g \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            nrf-rpc-dev \
+            bash -lc "export LD_LIBRARY_PATH=/workspace/tests/external/tools/bsim/lib:\$LD_LIBRARY_PATH && export BSIM_OUT_PATH=/workspace/tests/external/tools/bsim && cargo test --lib --workspace && cargo test --test integration_test"
 
 
   cargo-compile-check:
