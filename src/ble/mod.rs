@@ -497,6 +497,35 @@ impl<T: AsyncTransport> Ble<T> {
 
         Ok(())
     }
+
+    pub async fn begin_bt_command_loop<F, Fut>(&mut self, cb: F)
+    where
+        F: Fn([u8; 256], usize) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        /*
+        loop {
+            let mut buff = [0u8; 256];
+            let packet = match self.client.receive_packet(&mut buff).await {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            match packet.packet_type {
+                packet::TypeField::Command => match packet.payload {
+                    crate::decoding::ParsedPayload::Cbor(cbor_payload) => {
+                        let mut buff = [0u8; 256];
+                        let bytes = cbor_payload.into();
+                        buff.copy_from_slice(bytes);
+                        cb(buff, bytes.len()).await;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        */
+    }
 }
 
 /** LE scan parameters */
