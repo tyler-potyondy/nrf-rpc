@@ -44,8 +44,8 @@ impl DummyUart {
 
 impl AsyncTransport for DummyUart {
     type Error = DummyError;
-    type TxTransportBuffer<'a, const N: usize> = nrf_rpc::uart_transport::UartTxTransport<'a, N>;
-    type RxTransportBuffer<'a, const N: usize> = nrf_rpc::uart_transport::UartRxTransport<'a, N>;
+    type TxTransportPacket<'a> = nrf_rpc::uart_transport::UartTxTransport<'a>;
+    type RxTransportPacket<'a> = nrf_rpc::uart_transport::UartRxTransport<'a>;
 
     async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         let mut state = self.state.lock().unwrap();

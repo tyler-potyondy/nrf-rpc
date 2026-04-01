@@ -46,8 +46,8 @@ impl TransportError for MockError {}
 
 impl AsyncTransport for MockUart {
     type Error = MockError;
-    type TxTransportBuffer<'a, const N: usize> = nrf_rpc::uart_transport::UartTxTransport<'a, N>;
-    type RxTransportBuffer<'a, const N: usize> = nrf_rpc::uart_transport::UartRxTransport<'a, N>;
+    type TxTransportPacket<'a> = nrf_rpc::uart_transport::UartTxTransport<'a>;
+    type RxTransportPacket<'a> = nrf_rpc::uart_transport::UartRxTransport<'a>;
 
     async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         self.transmitted.borrow_mut().extend_from_slice(data);

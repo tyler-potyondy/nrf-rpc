@@ -12,7 +12,7 @@ pub mod packet;
 pub mod transport;
 pub mod uart_transport;
 
-pub use transport::{AsyncTransport, RpcRxTransportBuffer, RpcTxTransportBuffer, TransportError};
+pub use transport::{AsyncTransport, RpcRxTransportPacket, RpcTxTransportPacket, TransportError};
 
 use cbor_encoding::CborError;
 
@@ -28,6 +28,7 @@ pub enum RpcError {
     Cbor(CborError),
     InvalidResponse,
     Timeout,
+    NoResponse,
 }
 
 const NRF_RPC_PROTOCOL_VERSION_MIN: MinVersion = MinVersion::new(0);
@@ -41,6 +42,7 @@ impl core::fmt::Display for RpcError {
             RpcError::Cbor(e) => write!(f, "CBOR error: {}", e),
             RpcError::InvalidResponse => write!(f, "Invalid response"),
             RpcError::Timeout => write!(f, "Timeout"),
+            RpcError::NoResponse => write!(f, "No response received"),
         }
     }
 }
@@ -137,19 +139,20 @@ impl<T: AsyncTransport> RpcClient<T> {
         packet: NrfRpcPacket<'a, P>,
     ) -> Result<(), RpcError> {
         let mut buffer = [0u8; 256];
-        let mut rpc_transport_buf = T::TxTransportBuffer::<'_, 256>::new(&mut buffer);
+        let mut rpc_transport_buf = T::TxTransportPacket::<'_>::new(&mut buffer);
 
         packet
             .write_into(&mut rpc_transport_buf)
             .expect("Failed to write packet into transport buffer");
 
+        let encoded_buf = rpc_transport_buf
+            .encode_packet()
+            .expect("Failed to encode packet");
+
+        let encoded_buf_slice: &mut [u8] = encoded_buf.into();
+
         self.transport
-            .write(
-                rpc_transport_buf
-                    .try_into()
-                    .map_err(|_| RpcError::Transport)
-                    .expect("Failed to convert to [u8]"),
-            )
+            .write(encoded_buf_slice)
             .await
             .expect("Failed to write packet to transport");
 
@@ -166,26 +169,31 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        // Receive the corresponding response
-        let mut buffer = [0u8; 256];
-        let recv_packet = self
-            .receive_packet(&mut buffer)
-            .await
-            .expect("Failed to receive packet");
+        let mut retry_count = 3;
 
-        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-            return Ok(self
-                .decode_i32_response(payload.into())
-                .expect("Failed to decode i32 response"));
-        } else {
-            panic!("Expected CBOR payload, got something else");
+        for _ in 0..retry_count {
+            // Receive the corresponding response
+            let mut buffer = [0u8; 256];
+            let recv_packet_list = self.receive_packet(&mut buffer).await?;
+
+            for recv_packet in recv_packet_list.into_iter().flatten() {
+                if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                    return Ok(self
+                        .decode_i32_response(payload.into())
+                        .expect("Failed to decode i32 response"));
+                } else {
+                    // continue
+                }
+            }
         }
+
+        Err(RpcError::NoResponse)
     }
 
     pub(crate) async fn receive_packet<'a>(
         &mut self,
         output: &'a mut [u8; 256],
-    ) -> Result<ParsedNrfRpcPacket<'a>, RpcError> {
+    ) -> Result<[Option<ParsedNrfRpcPacket<'a>>; 5], RpcError> {
         // Get the raw packet from the "wire"
         let len = self
             .transport
@@ -193,13 +201,32 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to receive packet");
 
-        let transport_parse = T::RxTransportBuffer::<'_, 256>::new(output);
-        let parsed_transport = transport_parse
-            .try_into()
-            .map_err(|_| RpcError::Transport)
-            .expect("Failed to convert to [u8]");
+        let mut output_pkt_list: [Option<ParsedNrfRpcPacket<'a>>; 5] = [const { None }; 5];
+        let mut packet_index = 0;
 
-        Ok(ParsedNrfRpcPacket::try_from(parsed_transport).expect("Failed to parse packet"))
+        let mut remaining_buffer = &mut output[..len];
+        while remaining_buffer.len() > 0 {
+            let (raw_packet, next_remaining_buffer) =
+                T::RxTransportPacket::new(remaining_buffer).map_err(|_| RpcError::Transport)?;
+
+            let decoded_packet = raw_packet
+                .decode_raw_packet()
+                .map_err(|_| RpcError::InvalidResponse)?;
+
+            let decoded_packet_slice = decoded_packet.into();
+            let parsed_packet = ParsedNrfRpcPacket::try_from(decoded_packet_slice)
+                .map_err(|_| RpcError::InvalidResponse)?;
+
+            output_pkt_list[packet_index] = Some(parsed_packet);
+            packet_index += 1;
+
+            if let Some(next_buffer) = next_remaining_buffer {
+                remaining_buffer = next_buffer;
+            } else {
+                break;
+            }
+        }
+        Ok(output_pkt_list)
     }
 
     // pub(crate) async fn send_command(&mut self, packet: &[u8]) -> Result<i32, RpcError> {
