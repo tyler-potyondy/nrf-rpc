@@ -20,7 +20,12 @@
 //! ble.bt_le_adv_start(&param, &ad, &sd).await?;
 //! ```
 
-pub use crate::ble_types::{BT_LE_AD_GENERAL, BT_LE_AD_NO_BREDR, BtAddrLe, BtData, BtLeAdvParam};
+pub mod ble_types;
+pub mod bt_le_adv;
+
+pub use crate::ble::ble_types::{
+    BT_LE_AD_GENERAL, BT_LE_AD_NO_BREDR, BtAddrLe, BtData, BtLeAdvParam,
+};
 use crate::cbor_encoding::{CborError, CborPayloadBuilder};
 use crate::packet::{
     self, CommandId, DestContextId, DstGroupId, NrfRpcPacket, SrcContextId, SrcGroupId,
@@ -491,35 +496,6 @@ impl<T: AsyncTransport> Ble<T> {
         }
 
         Ok(())
-    }
-
-    pub async fn begin_bt_command_loop<F, Fut>(&mut self, cb: F)
-    where
-        F: Fn([u8; 256], usize) -> Fut,
-        Fut: Future<Output = ()>,
-    {
-        /*
-        loop {
-            let mut buff = [0u8; 256];
-            let packet = match self.client.receive_packet(&mut buff).await {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            match packet.packet_type {
-                packet::TypeField::Command => match packet.payload {
-                    crate::decoding::ParsedPayload::Cbor(cbor_payload) => {
-                        let mut buff = [0u8; 256];
-                        let bytes = cbor_payload.into();
-                        buff.copy_from_slice(bytes);
-                        cb(buff, bytes.len()).await;
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
-        */
     }
 }
 

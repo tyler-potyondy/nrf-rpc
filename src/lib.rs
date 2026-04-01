@@ -4,7 +4,6 @@
 extern crate std;
 
 pub mod ble;
-mod ble_types;
 mod cbor_encoding;
 mod decoding;
 #[doc(hidden)]
