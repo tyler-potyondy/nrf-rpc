@@ -75,7 +75,7 @@
 //!     rejected as a duplicate.
 
 use crate::{
-    AsyncTransport,
+    AsyncTransport, TransportError,
     transport::{
         DecodedTransportPacket, EncodedTransportPacket, RpcRxTransportPacket, RpcTxTransportPacket,
         TransportBuffer,
@@ -132,7 +132,9 @@ impl<'a> RpcTxTransportPacket<'a> for UartTxTransport<'a> {
     }
 
     fn new(buffer: &'a mut [u8]) -> Self {
-        UartTxTransport::new(buffer)
+        Self {
+            inner: UartTransportBuffer::<'_, EncodingInProgress>::new(buffer),
+        }
     }
 
     fn encode_packet(self) -> Result<Self::EncodedTransportPacket, ()> {
@@ -149,6 +151,19 @@ impl<'a> UartRxTransport<'a> {
         Self {
             inner: UartTransportBuffer::<'_, UncheckedEncoded>::new(buffer),
         }
+
+        if !found_start {
+            // No delimiter byte found, return error with original buffer.
+            return Err((buffer, ()));
+        }
+
+        // Split buffer into two slices: the packet (start_ind..=closing_ind) and the remaining data after.
+        let (packet_and_before, remaining_buffer) = buffer.split_at_mut(closing_ind + 1);
+        let processing_buffer: &mut [u8] = &mut packet_and_before[start_ind..];
+
+        let transport_buf = UartRxTransport::new(processing_buffer);
+
+        Ok((transport_buf, Some(remaining_buffer)))
     }
 
     fn decode(self) -> Result<UartTransportBuffer<'a, Decoded>, ()> {
@@ -352,6 +367,12 @@ impl<'a> UartTransportBuffer<'a, DecodingInProgress> {
     }
 }
 
+impl<'a> UartTransportBuffer<'a, Decoded> {
+    fn into_bytes(self) -> &'a mut [u8] {
+        self.buf.into()
+    }
+}
+
 impl<'a> UartTransportBuffer<'a, UncheckedEncoded> {
     pub fn new(input_buffer: &'a mut [u8]) -> Self {
         Self {
@@ -410,6 +431,13 @@ impl<'a> UartTransportBuffer<'a, EncodingInProgress> {
     }
 }
 
+impl<'a> UartTransportBuffer<'a, Encoded> {
+    /// Consume Encoded UartTransportBuffer to slice of bytes.
+    fn into_bytes(self) -> &'a mut [u8] {
+        self.buf.into()
+    }
+}
+
 /// Calculate CRC16_CCITT with seed.
 ///
 /// Matches Zephyr's `crc16_ccitt` configuration, which uses reversed
@@ -431,6 +459,8 @@ fn crc16_ccitt(seed: u16, data: u8) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use minicbor::decode;
+
     use super::*;
 
     #[test]
@@ -487,7 +517,7 @@ mod tests {
             .complete_encoding()
             .expect("Failed to convert to ready buffer");
 
-        let ready_buffer_slice: &mut [u8] = ready_buffer.into();
+        let ready_buffer_slice: &mut [u8] = ready_buffer.into_bytes();
         assert_eq!(
             ready_buffer_slice,
             [
