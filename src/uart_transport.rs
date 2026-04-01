@@ -269,6 +269,11 @@ impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, DecodingInProgress>>
 
         let output_len = write_pos;
 
+        // Packets must have at least 2 bytes for the CRC
+        if output_len < 2 {
+            return Err(());
+        }
+
         // Crc is stored in the last 2 bytes of the buffer. Calculate
         // the Crc of the received data and compare it to the received CRC.
         let mut crc = 0xffff;
