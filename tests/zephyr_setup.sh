@@ -102,10 +102,10 @@ log_info "Building Zephyr nrf_rpc protocol_serialization server example..."
 ls
 
 
-# confirm we are on branch bsim-test
+# confirm we are on branch cgm-bsim
 current_branch=$(git -C nrf rev-parse --abbrev-ref HEAD)
-if [ "$current_branch" != "bsim-test" ]; then
-    git -C nrf checkout bsim-test
+if [ "$current_branch" != "cgm-bsim" ]; then
+    git -C nrf checkout cgm-bsim
 fi
 
 
