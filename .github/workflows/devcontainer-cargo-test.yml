@@ -122,6 +122,7 @@ jobs:
             .
 
       - name: Fix workspace permissions for container user
+        if: env.NEED_BUILD == 'true'
         run: sudo chown -R 1000:1000 "$GITHUB_WORKSPACE"
 
       - name: Run Zephyr setup (fallback if no precompiled binaries)
@@ -134,6 +135,10 @@ jobs:
             -w /workspace \
             nrf-rpc-dev \
             bash -lc "cd tests && echo y | ./zephyr_setup.sh"
+      
+      - name: Restore workspace permissions for runner
+        if: env.NEED_BUILD == 'true'
+        run: sudo chown -R runner:runner "$GITHUB_WORKSPACE"
       
       - name: Final binary verification
         run: |
