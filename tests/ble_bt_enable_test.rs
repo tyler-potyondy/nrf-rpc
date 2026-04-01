@@ -67,6 +67,10 @@ impl AsyncTransport for DummyUart {
         buffer[..n].copy_from_slice(&state.response[..n]);
         Ok(n)
     }
+
+    async fn delay_ms(&mut self, _ms: u32) {
+        // No-op for tests
+    }
 }
 
 /// Minimal async executor for this test - same pattern as in integration_test.rs.
@@ -151,7 +155,7 @@ fn test_bt_enable_uses_enable_command_and_parses_status() {
     }
 
     // bt_enable should complete successfully given a zero status response.
-    block_on(ble.bt_enable(5)).expect("bt_enable RPC failed");
+    block_on(ble.bt_enable(None)).expect("bt_enable RPC failed");
 
     // Ensure we sent exactly one command frame and performed at least one read.
     let state = state_handle.lock().unwrap();

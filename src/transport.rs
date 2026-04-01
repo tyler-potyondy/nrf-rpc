@@ -57,6 +57,9 @@ pub trait AsyncTransport {
     /// Returns the number of bytes read. May return fewer bytes than
     /// the buffer size if data is not immediately available.
     async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error>;
+
+    /// Delay for the specified number of milliseconds
+    async fn delay_ms(&mut self, ms: u32);
 }
 
 #[derive(Debug)]

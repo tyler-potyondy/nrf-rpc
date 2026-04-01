@@ -497,6 +497,7 @@ impl<T: AsyncTransport> Ble<T> {
         F: Fn([u8; 256], usize) -> Fut,
         Fut: Future<Output = ()>,
     {
+        /*
         loop {
             let mut buff = [0u8; 256];
             let packet = match self.client.receive_packet(&mut buff).await {
@@ -517,6 +518,7 @@ impl<T: AsyncTransport> Ble<T> {
                 _ => {}
             }
         }
+        */
     }
 }
 

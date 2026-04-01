@@ -57,4 +57,8 @@ impl AsyncTransport for MockUart {
     async fn read(&mut self, _buffer: &mut [u8]) -> Result<usize, Self::Error> {
         Ok(0)
     }
+
+    async fn delay_ms(&mut self, _ms: u32) {
+        // No-op for tests
+    }
 }

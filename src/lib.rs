@@ -171,7 +171,12 @@ impl<T: AsyncTransport> RpcClient<T> {
 
         let mut retry_count = 3;
 
-        for _ in 0..retry_count {
+        for i in 0..retry_count {
+            // Wait before retrying (except for the first attempt)
+            if i > 0 {
+                self.transport.delay_ms(100).await;
+            }
+
             // Receive the corresponding response
             let mut buffer = [0u8; 256];
             let recv_packet_list = self.receive_packet(&mut buffer).await?;
