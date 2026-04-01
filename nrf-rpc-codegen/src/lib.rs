@@ -138,14 +138,30 @@ fn map_c_type_to_rust_and_encoding(
                 },
             )
         }
-        CType::Struct(_name) => {
-            // For struct types, encode as callback slot or custom encoding
-            (
-                quote! { u64 },
-                quote! {
-                    builder = builder.encode_uint_64(#param_name)?;
-                },
-            )
+        CType::Struct(name) => {
+            // Check if this is a callback type (ends with _cb_t or _callback)
+            if name.ends_with("_cb_t") || name.ends_with("_callback") {
+                // For callback types, use Option<u32> where:
+                // - None encodes as CBOR null
+                // - Some(slot) encodes as CBOR int32 (callback slot ID)
+                (
+                    quote! { Option<u32> },
+                    quote! {
+                        builder = match #param_name {
+                            None => builder.cbor_null()?,
+                            Some(slot) => builder.encode_int_32(slot as i32)?,
+                        };
+                    },
+                )
+            } else {
+                // For other struct types, encode as u64
+                (
+                    quote! { u64 },
+                    quote! {
+                        builder = builder.encode_uint_64(#param_name)?;
+                    },
+                )
+            }
         }
         CType::Void => (quote! { () }, quote! {}),
     }
@@ -261,9 +277,6 @@ impl RpcFromCArgs {
                 // Build CBOR payload
                 let mut buffer = [0u8; 256];
                 let mut builder = nrf_rpc::cbor_encoding::CborPayloadBuilder::new(&mut buffer);
-
-                // Encode scratchpad size (always 0 for now)
-                builder = builder.encode_uint_64(0)?;
 
                 // Encode parameters
                 #(#param_encodings)*

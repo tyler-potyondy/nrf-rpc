@@ -35,34 +35,37 @@ pub enum CType {
 /// Example: "bt_enable(bt_ready_cb_t cb)"
 pub fn parse_c_signature(signature: &str) -> Result<CFunctionInfo, String> {
     let signature = signature.trim();
-    
-    let open_paren = signature.find('(')
+
+    let open_paren = signature
+        .find('(')
         .ok_or_else(|| format!("No opening parenthesis in: {}", signature))?;
-    let close_paren = signature.rfind(')')
+    let close_paren = signature
+        .rfind(')')
         .ok_or_else(|| format!("No closing parenthesis in: {}", signature))?;
-    
+
     if close_paren < open_paren {
         return Err("Closing parenthesis before opening".to_string());
     }
-    
+
     let before_paren = signature[..open_paren].trim();
     let params_str = signature[open_paren + 1..close_paren].trim();
-    
+
     // Parse function name (last token before parenthesis)
     let tokens: Vec<&str> = before_paren.split_whitespace().collect();
-    let function_name = tokens.last()
+    let function_name = tokens
+        .last()
         .ok_or_else(|| "No function name found".to_string())?
         .to_string();
-    
+
     // Parse return type (everything before function name, or void if empty)
     let return_type = if tokens.len() > 1 {
         parse_c_type(&tokens[..tokens.len() - 1].join(" "))?
     } else {
         CType::Void
     };
-    
+
     let parameters = parse_parameters_from_string(params_str)?;
-    
+
     Ok(CFunctionInfo {
         name: function_name,
         parameters,
@@ -72,17 +75,17 @@ pub fn parse_c_signature(signature: &str) -> Result<CFunctionInfo, String> {
 
 fn parse_c_type(type_str: &str) -> Result<CType, String> {
     let type_str = type_str.trim();
-    
+
     if type_str == "void" {
         return Ok(CType::Void);
     }
-    
+
     let is_const = type_str.starts_with("const ");
     let type_str_no_const = if is_const { &type_str[6..] } else { type_str };
-    
+
     let pointer_count = type_str_no_const.matches('*').count();
     let base_type_str = type_str_no_const.replace('*', "").trim().to_string();
-    
+
     let mut base_type = match base_type_str.as_str() {
         "void" => CType::Void,
         "int" => CType::Int,
@@ -99,7 +102,7 @@ fn parse_c_type(type_str: &str) -> Result<CType, String> {
             }
         }
     };
-    
+
     for _ in 0..pointer_count {
         base_type = if is_const {
             CType::ConstPointer(Box::new(base_type))
@@ -107,7 +110,7 @@ fn parse_c_type(type_str: &str) -> Result<CType, String> {
             CType::Pointer(Box::new(base_type))
         };
     }
-    
+
     Ok(base_type)
 }
 
@@ -115,47 +118,34 @@ fn parse_parameters_from_string(params_str: &str) -> Result<Vec<CParameter>, Str
     if params_str.is_empty() || params_str == "void" {
         return Ok(Vec::new());
     }
-    
+
     let param_strings = split_parameters(params_str);
     let mut parameters = Vec::new();
-    
+
     for (idx, param_str) in param_strings.iter().enumerate() {
         let param_str = param_str.trim();
         let tokens: Vec<&str> = param_str.split_whitespace().collect();
-        
+
         if tokens.is_empty() {
             return Err(format!("Empty parameter at position {}", idx));
         }
-        
-        let mut name = String::new();
-        let mut type_parts = Vec::new();
-        
-        for token in &tokens {
-            if token.contains('*') {
-                type_parts.push(token.to_string());
-            } else if name.is_empty() {
-                type_parts.push(token.to_string());
-                name = token.to_string();
-            } else {
-                type_parts.pop();
-                type_parts.push(name.clone());
-                name = token.to_string();
-            }
-        }
-        
-        if name.is_empty() || type_parts.is_empty() {
-            name = format!("param{}", idx);
-            type_parts = tokens.iter().map(|s| s.to_string()).collect();
+
+        // For simple case like "type_name param_name", last token is param name
+        // Everything before is the type
+        if tokens.len() >= 2 {
+            let name = tokens.last().unwrap().to_string();
+            let type_str = tokens[..tokens.len() - 1].join(" ");
+            let c_type = parse_c_type(&type_str)?;
+            parameters.push(CParameter { name, c_type });
         } else {
-            type_parts.pop();
+            // Single token - assume it's a type with anonymous parameter
+            let name = format!("param{}", idx);
+            let type_str = tokens[0];
+            let c_type = parse_c_type(type_str)?;
+            parameters.push(CParameter { name, c_type });
         }
-        
-        let type_str = type_parts.join(" ");
-        let c_type = parse_c_type(&type_str)?;
-        
-        parameters.push(CParameter { name, c_type });
     }
-    
+
     Ok(parameters)
 }
 
@@ -163,7 +153,7 @@ fn split_parameters(params_str: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut current = String::new();
     let mut paren_depth = 0;
-    
+
     for ch in params_str.chars() {
         match ch {
             '(' => {
@@ -181,10 +171,10 @@ fn split_parameters(params_str: &str) -> Vec<String> {
             _ => current.push(ch),
         }
     }
-    
+
     if !current.trim().is_empty() {
         result.push(current.trim().to_string());
     }
-    
+
     result
 }
