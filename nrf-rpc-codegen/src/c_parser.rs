@@ -1,5 +1,23 @@
 //! Simple C function signature parser for RPC code generation.
 
+/// Check if a string is a valid C identifier
+fn is_valid_identifier(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    
+    // First character must be letter or underscore
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    
+    // Rest can be letters, digits, or underscores
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CFunctionInfo {
@@ -133,8 +151,21 @@ fn parse_parameters_from_string(params_str: &str) -> Result<Vec<CParameter>, Str
         // For simple case like "type_name param_name", last token is param name
         // Everything before is the type
         if tokens.len() >= 2 {
-            let name = tokens.last().unwrap().to_string();
-            let type_str = tokens[..tokens.len() - 1].join(" ");
+            let mut name = tokens.last().unwrap().to_string();
+            let mut type_tokens = tokens[..tokens.len() - 1].to_vec();
+            
+            // Handle pointer/asterisk attached to parameter name: "type *name"
+            if name.starts_with('*') {
+                // Move the * from the name to the type
+                type_tokens.push("*");
+                name = name[1..].to_string();
+            }
+            
+            if !is_valid_identifier(&name) {
+                return Err(format!("`{:?}` is not a valid identifier", name));
+            }
+            
+            let type_str = type_tokens.join(" ");
             let c_type = parse_c_type(&type_str)?;
             parameters.push(CParameter { name, c_type });
         } else {
