@@ -168,8 +168,7 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let mut retry_count = 3;
-
+        let retry_count = 3;
         for i in 0..retry_count {
             // Wait before retrying (except for the first attempt)
             if i > 0 {

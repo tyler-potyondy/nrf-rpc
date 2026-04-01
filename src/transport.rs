@@ -8,8 +8,6 @@
 
 use core::fmt;
 
-use crate::{decoding::ParsedNrfRpcPacket, packet::NrfRpcPacket};
-
 /// Error trait for transport implementations
 pub trait TransportError: fmt::Debug {}
 

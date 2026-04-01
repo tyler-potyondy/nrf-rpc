@@ -75,7 +75,7 @@
 //!     rejected as a duplicate.
 
 use crate::{
-    AsyncTransport, TransportError,
+    AsyncTransport,
     transport::{
         DecodedTransportPacket, EncodedTransportPacket, RpcRxTransportPacket, RpcTxTransportPacket,
         TransportBuffer,
@@ -132,9 +132,7 @@ impl<'a> RpcTxTransportPacket<'a> for UartTxTransport<'a> {
     }
 
     fn new(buffer: &'a mut [u8]) -> Self {
-        Self {
-            inner: UartTransportBuffer::<'_, EncodingInProgress>::new(buffer),
-        }
+        UartTxTransport::new(buffer)
     }
 
     fn encode_packet(self) -> Result<Self::EncodedTransportPacket, ()> {
@@ -367,12 +365,6 @@ impl<'a> UartTransportBuffer<'a, DecodingInProgress> {
     }
 }
 
-impl<'a> UartTransportBuffer<'a, Decoded> {
-    fn into_bytes(self) -> &'a mut [u8] {
-        self.buf.into()
-    }
-}
-
 impl<'a> UartTransportBuffer<'a, UncheckedEncoded> {
     pub fn new(input_buffer: &'a mut [u8]) -> Self {
         Self {
@@ -431,13 +423,6 @@ impl<'a> UartTransportBuffer<'a, EncodingInProgress> {
     }
 }
 
-impl<'a> UartTransportBuffer<'a, Encoded> {
-    /// Consume Encoded UartTransportBuffer to slice of bytes.
-    fn into_bytes(self) -> &'a mut [u8] {
-        self.buf.into()
-    }
-}
-
 /// Calculate CRC16_CCITT with seed.
 ///
 /// Matches Zephyr's `crc16_ccitt` configuration, which uses reversed
@@ -459,8 +444,6 @@ fn crc16_ccitt(seed: u16, data: u8) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use minicbor::decode;
-
     use super::*;
 
     #[test]
@@ -517,7 +500,7 @@ mod tests {
             .complete_encoding()
             .expect("Failed to convert to ready buffer");
 
-        let ready_buffer_slice: &mut [u8] = ready_buffer.into_bytes();
+        let ready_buffer_slice: &mut [u8] = ready_buffer.into();
         assert_eq!(
             ready_buffer_slice,
             [
