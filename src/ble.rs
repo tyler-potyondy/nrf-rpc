@@ -25,7 +25,7 @@ use crate::cbor_encoding::{CborError, CborPayloadBuilder};
 use crate::packet::{
     self, CommandId, DestContextId, DstGroupId, NrfRpcPacket, SrcContextId, SrcGroupId,
 };
-use crate::{AsyncTransport, RpcClient, RpcError};
+use crate::{AsyncTransport, RpcClient};
 
 const BT_RPC_GROUP_ID: u8 = 0x0;
 const RPC_UTILS_GROUP_ID: u8 = 0x1;
@@ -33,7 +33,7 @@ const RPC_UTILS_GROUP_ID: u8 = 0x1;
 // ============================================================================
 // Ble Struct
 // ============================================================================
-
+#[allow(dead_code)]
 #[repr(u8)]
 enum BleClientCommandId {
     /* bluetooth.h API */
@@ -157,6 +157,7 @@ enum BleClientCommandId {
 
 /// Host commands IDs used in bluetooth API serialization.
 /// These commands are sent from the host to the client.
+#[allow(dead_code)]
 #[repr(u8)]
 enum BleHostCommandId {
     /* bluetooth.h API */
@@ -483,7 +484,7 @@ impl<T: AsyncTransport> Ble<T> {
             .client
             .send_command_and_get_i32(packet)
             .await
-            .expect("Failed to send command and get i32");
+            .map_err(|_| BleError::RpcError)?;
 
         if status != 0 {
             return Err(BleError::RpcError);

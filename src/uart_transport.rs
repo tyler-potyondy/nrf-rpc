@@ -75,7 +75,7 @@
 //!     rejected as a duplicate.
 
 use crate::{
-    AsyncTransport, TransportError,
+    AsyncTransport,
     transport::{
         DecodedTransportPacket, EncodedTransportPacket, RpcRxTransportPacket, RpcTxTransportPacket,
         TransportBuffer,
@@ -132,9 +132,7 @@ impl<'a> RpcTxTransportPacket<'a> for UartTxTransport<'a> {
     }
 
     fn new(buffer: &'a mut [u8]) -> Self {
-        Self {
-            inner: UartTransportBuffer::<'_, EncodingInProgress>::new(buffer),
-        }
+        UartTxTransport::new(buffer)
     }
 
     fn encode_packet(self) -> Result<Self::EncodedTransportPacket, ()> {
@@ -337,11 +335,7 @@ impl<'a> UartTransportBuffer<'a, DecodingInProgress> {
             u16::from_le_bytes([output[output_len - 2], output[output_len - 1]]);
 
         if crc != received_crc {
-            // todo: remove panic and add error handling
-            panic!(
-                "CRC mismatch: expected 0x{:04x}, got 0x{:04x}",
-                crc, received_crc
-            );
+            // todo: add error handling
             return Err(());
         }
 
@@ -355,12 +349,6 @@ impl<'a> UartTransportBuffer<'a, DecodingInProgress> {
             crc: 0xffff,
             status: core::marker::PhantomData,
         })
-    }
-}
-
-impl<'a> UartTransportBuffer<'a, Decoded> {
-    fn into_bytes(self) -> &'a mut [u8] {
-        self.buf.into()
     }
 }
 
@@ -422,13 +410,6 @@ impl<'a> UartTransportBuffer<'a, EncodingInProgress> {
     }
 }
 
-impl<'a> UartTransportBuffer<'a, Encoded> {
-    /// Consume Encoded UartTransportBuffer to slice of bytes.
-    fn into_bytes(self) -> &'a mut [u8] {
-        self.buf.into()
-    }
-}
-
 /// Calculate CRC16_CCITT with seed.
 ///
 /// Matches Zephyr's `crc16_ccitt` configuration, which uses reversed
@@ -450,8 +431,6 @@ fn crc16_ccitt(seed: u16, data: u8) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use minicbor::decode;
-
     use super::*;
 
     #[test]
@@ -508,7 +487,7 @@ mod tests {
             .complete_encoding()
             .expect("Failed to convert to ready buffer");
 
-        let ready_buffer_slice: &mut [u8] = ready_buffer.into_bytes();
+        let ready_buffer_slice: &mut [u8] = ready_buffer.into();
         assert_eq!(
             ready_buffer_slice,
             [
