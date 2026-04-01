@@ -12,6 +12,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Free up disk space
+        run: |
+          # Show initial disk usage
+          echo "=== Initial Disk Usage ==="
+          df -h
+          
+          # Remove unnecessary preinstalled software
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          
+          # Clean Docker
+          docker system prune -af --volumes || true
+          
+          # Show disk usage after cleanup
+          echo "=== After Cleanup ==="
+          df -h
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -71,6 +90,7 @@ jobs:
             -w /workspace \
             nrf-rpc-dev \
             bash -lc "cargo test --lib --workspace && cargo test --test integration_test"
+
 
   cargo-compile-check:
     runs-on: ubuntu-latest
