@@ -472,9 +472,16 @@ fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockUart) {
         }
     };
 
-    let socat = create_socat_socket(&interface, test_name);
-    let uart = MockUart::new(test_name);
+    let socket_path = test_socket_path(test_name);
+    let socat = create_socat_socket(&interface, &socket_path);
+    let uart = MockUart::new(&socket_path);
     (TestProcesses::new(rpc_server, lines, socat), uart)
+}
+
+fn test_socket_path(test_name: &str) -> String {
+    let mut socket_path = std::env::temp_dir();
+    socket_path.push(format!("nrf_rpc_{}_{}.sock", std::process::id(), test_name));
+    socket_path.to_string_lossy().into_owned()
 }
 
 fn create_socat_socket(pty_port: &str, socket_path: &str) -> std::process::Child {

@@ -115,7 +115,8 @@ ls
 # confirm we are on branch cgm-bsim
 current_branch=$(git -C nrf rev-parse --abbrev-ref HEAD)
 if [ "$current_branch" != "cgm-bsim" ]; then
-    git -C nrf checkout cgm-bsim
+    git -C nrf fetch origin cgm-bsim
+    git -C nrf checkout -B cgm-bsim FETCH_HEAD
 fi
 
 

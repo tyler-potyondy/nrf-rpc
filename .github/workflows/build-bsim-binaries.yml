@@ -3,13 +3,21 @@ name: Build BabbleSim Binaries
 on:
   workflow_dispatch:  # Manual trigger
   push:
+    branches:
+      - main
+      - master
     paths:
       - 'tests/zephyr_setup.sh'
       - '.github/workflows/build-bsim-binaries.yml'
-  # Trigger when nrf submodule changes
+      - 'tests/external/nrf'
   pull_request:
     paths:
+      - 'tests/zephyr_setup.sh'
+      - '.github/workflows/build-bsim-binaries.yml'
       - 'tests/external/nrf'
+
+permissions:
+  contents: write
 
 jobs:
   build-binaries:
@@ -47,11 +55,15 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
             nrf-rpc-dev \
-            bash -lc "cd tests && echo y | ./zephyr_setup.sh"
+            bash -lc "cd tests && ./zephyr_setup.sh --yes"
+      
+      - name: Restore workspace permissions for host
+        run: sudo chown -R runner:runner "$GITHUB_WORKSPACE"
       
       - name: Package binaries
         run: |
           cd tests/external/tools/bsim
+          chmod -R u+w bin/ lib/
           tar -czf bsim-binaries.tar.gz bin/ lib/
           mv bsim-binaries.tar.gz $GITHUB_WORKSPACE/
       
@@ -70,7 +82,7 @@ jobs:
       
       - name: Create Release (optional)
         uses: softprops/action-gh-release@v1
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         with:
           tag_name: bsim-${{ steps.version.outputs.sha }}-${{ steps.version.outputs.date }}
           name: BabbleSim Binaries ${{ steps.version.outputs.sha }}

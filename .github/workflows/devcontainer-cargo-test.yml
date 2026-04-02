@@ -47,7 +47,9 @@ jobs:
       
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        
+        with:
+          toolchain: stable
+
       - name: Setup swap space
         run: |
           # Remove existing swapfile if present
@@ -122,7 +124,6 @@ jobs:
             .
 
       - name: Fix workspace permissions for container user
-        if: env.NEED_BUILD == 'true'
         run: sudo chown -R 1000:1000 "$GITHUB_WORKSPACE"
 
       - name: Run Zephyr setup (fallback if no precompiled binaries)
@@ -134,7 +135,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
             nrf-rpc-dev \
-            bash -lc "cd tests && echo y | ./zephyr_setup.sh"
+            bash -lc "cd tests && ./zephyr_setup.sh --yes"
       
       - name: Restore workspace permissions for runner
         if: env.NEED_BUILD == 'true'
@@ -155,6 +156,7 @@ jobs:
           echo "=== Binary check complete ==="
 
       - name: Build devcontainer image for tests
+        if: env.NEED_BUILD != 'true'
         run: |
           docker build \
             --file .devcontainer/Dockerfile \
@@ -169,8 +171,10 @@ jobs:
             --memory-swap=14g \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
+            -e CARGO_HOME=/tmp/cargo \
+            -e CARGO_TARGET_DIR=/tmp/target \
             nrf-rpc-dev \
-            bash -lc "export LD_LIBRARY_PATH=/workspace/tests/external/tools/bsim/lib:\$LD_LIBRARY_PATH && export BSIM_OUT_PATH=/workspace/tests/external/tools/bsim && cargo test --lib --workspace && cargo test --test integration_test"
+            bash -lc "export LD_LIBRARY_PATH=/workspace/tests/external/tools/bsim/lib:\$LD_LIBRARY_PATH && export BSIM_OUT_PATH=/workspace/tests/external/tools/bsim && cargo test --lib --workspace && cargo test --test integration_test -- --test-threads=1"
 
 
   cargo-compile-check:
@@ -182,6 +186,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
 
       - name: Cargo check (compile test)
         run: cargo check --workspace --all-targets
