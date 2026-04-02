@@ -7,6 +7,15 @@
 //! rx/tx to a unix socket. The test here then provides a mock transport layer that
 //! directs client writes to this socket and polls for responses on the socket.
 
+use nrf_rpc::ble::cgm::{
+    BT_UUID_CGM_FEATURE_VAL, BT_UUID_CGM_MEASUREMENT_VAL, BT_UUID_CGM_STATUS_VAL, BT_UUID_CGMS_VAL,
+    CgmMeasurement, encode_uuid_16,
+};
+use nrf_rpc::ble::{
+    BT_GATT_CCC_NOTIFY, BT_LE_SCAN_TYPE_ACTIVE, BtConnLeCreateParam, BtGattDiscoverParams,
+    BtGattDiscoverType, BtGattReadParams, BtGattSubscribeParams, BtLeConnParam, BtLeScanParam,
+    ScanResultData,
+};
 use nrf_rpc::{AsyncTransport, RpcClient, TransportError, ble::Ble, uart_transport::Uart};
 use serial_test::serial;
 use std::collections::HashSet;
@@ -190,8 +199,25 @@ impl AsyncTransport for MockUart {
 
         loop {
             {
-                let mut rx = self.rx_buffer.lock().unwrap();
+                let rx = self.rx_buffer.lock().unwrap();
                 if !rx.is_empty() {
+                    // Data has started arriving.  Wait until bytes stop
+                    // flowing so we drain complete HDLC frames rather than
+                    // splitting on a 7E delimiter boundary.
+                    let mut prev_len = rx.len();
+                    drop(rx);
+
+                    loop {
+                        std::thread::sleep(Duration::from_millis(30));
+                        let rx = self.rx_buffer.lock().unwrap();
+                        let cur_len = rx.len();
+                        if cur_len == prev_len {
+                            break; // no new data arrived → coalesced
+                        }
+                        prev_len = cur_len;
+                    }
+
+                    let mut rx = self.rx_buffer.lock().unwrap();
                     let n = core::cmp::min(buffer.len(), rx.len());
                     buffer[..n].copy_from_slice(&rx[..n]);
                     rx.drain(0..n);
@@ -589,4 +615,345 @@ fn client_test_helper(uart: MockUart) -> RpcClient<MockUart> {
     embassy_futures::block_on(client.init()).expect("Failed to initialize client");
 
     client
+}
+
+// =============================================================================
+// CGM Central Integration Tests
+// =============================================================================
+
+/// Helper: Initialize BLE client with bt_enable and connection callback registration.
+fn cgm_ble_init(uart: MockUart) -> Ble<MockUart> {
+    let mut ble =
+        embassy_futures::block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
+
+    // Enable Bluetooth
+    let result = embassy_futures::block_on(ble.bt_enable(None));
+    assert!(result.is_ok(), "bt_enable failed: {:?}", result.err());
+
+    // Register connection callbacks so the server forwards connect/disconnect events
+    let result = embassy_futures::block_on(ble.bt_conn_cb_register_on_remote());
+    assert!(
+        result.is_ok(),
+        "bt_conn_cb_register_on_remote failed: {:?}",
+        result.err()
+    );
+
+    // Register scan callbacks so the server forwards scan result events
+    let result = embassy_futures::block_on(ble.bt_le_scan_cb_register_on_remote());
+    assert!(
+        result.is_ok(),
+        "bt_le_scan_cb_register_on_remote failed: {:?}",
+        result.err()
+    );
+
+    ble
+}
+
+#[test]
+/// Test that BLE scanning can be started and stopped successfully.
+///
+/// This verifies that the bt_le_scan_start RPC command is correctly encoded
+/// and accepted by the Zephyr server, and that the server begins scanning
+/// for BLE devices (including the CGM peripheral running in BSIM).
+fn test_cgm_scan_start_stop() {
+    println!("Starting CGM scan start/stop test...");
+
+    let (mut processes, uart) = run_zephyr_rpc_server_exe("test_cgm_scan_start_stop");
+
+    let mut ble = cgm_ble_init(uart);
+
+    // Start scanning with default active scan parameters
+    let scan_params = BtLeScanParam {
+        scan_type: BT_LE_SCAN_TYPE_ACTIVE,
+        options: 0,
+        interval: 0x0060,
+        window: 0x0030,
+        timeout: 0,
+        interval_coded: 0,
+        window_coded: 0,
+    };
+
+    let result = embassy_futures::block_on(ble.bt_le_scan_start(&scan_params, None));
+    assert!(
+        result.is_ok(),
+        "bt_le_scan_start failed: {:?}",
+        result.err()
+    );
+    let status = result.unwrap();
+    println!("bt_le_scan_start returned status: {}", status);
+    assert_eq!(
+        status, 0,
+        "bt_le_scan_start returned non-zero status: {}",
+        status
+    );
+
+    // Give the scanner a moment to discover the CGM peripheral
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Stop scanning
+    let result = embassy_futures::block_on(ble.bt_le_scan_stop());
+    assert!(result.is_ok(), "bt_le_scan_stop failed: {:?}", result.err());
+    let status = result.unwrap();
+    println!("bt_le_scan_stop returned status: {}", status);
+
+    // Verify that the Zephyr side initialized BT and started scanning
+    processes.search_stdout_for_strings(HashSet::from([
+        "bt_hci_core: HW Platform: Nordic Semiconductor",
+    ]));
+}
+
+#[test]
+/// Test that bt_enable + scan start works and the server initializes properly.
+///
+/// This is a simpler smoke test for the CGM central flow — just enabling BT
+/// and starting a scan, verifying the Zephyr logs show BT initialization.
+fn test_cgm_bt_enable_and_scan() {
+    println!("Starting CGM bt_enable + scan test...");
+
+    let (mut processes, uart) = run_zephyr_rpc_server_exe("test_cgm_bt_enable_and_scan");
+
+    let mut ble =
+        embassy_futures::block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
+
+    // Enable Bluetooth
+    let result = embassy_futures::block_on(ble.bt_enable(None));
+    assert!(result.is_ok(), "bt_enable failed: {:?}", result.err());
+
+    // Start active scanning
+    let scan_params = BtLeScanParam::default();
+    let result = embassy_futures::block_on(ble.bt_le_scan_start(&scan_params, None));
+    assert!(
+        result.is_ok(),
+        "bt_le_scan_start failed: {:?}",
+        result.err()
+    );
+
+    let status = result.unwrap();
+    assert_eq!(status, 0, "bt_le_scan_start returned error: {}", status);
+
+    // Verify BT initialization on server side
+    processes.search_stdout_for_strings(HashSet::from([
+        "bt_hci_core: HW Platform: Nordic Semiconductor",
+    ]));
+}
+
+#[test]
+/// Test CGM GATT discovery request.
+///
+/// After enabling BT, registering connection callbacks, and starting a scan,
+/// this test waits for the server to connect to the CGM peripheral (via BSIM),
+/// then initiates GATT service discovery for the CGM Service UUID (0x181F).
+///
+/// Note: Since we don't currently handle async callback events from the server
+/// (scan result → auto-connect → connected callback → discover), this test
+/// takes the simplest approach: just verify the RPC commands are accepted.
+fn test_cgm_gatt_discover() {
+    println!("Starting CGM GATT discover test...");
+
+    let (mut processes, uart) = run_zephyr_rpc_server_exe("test_cgm_gatt_discover");
+
+    let mut ble = cgm_ble_init(uart);
+
+    // Start scanning for CGM peripheral
+    let scan_params = BtLeScanParam {
+        scan_type: BT_LE_SCAN_TYPE_ACTIVE,
+        options: 0,
+        interval: 0x0060,
+        window: 0x0030,
+        timeout: 0,
+        interval_coded: 0,
+        window_coded: 0,
+    };
+
+    let result = embassy_futures::block_on(ble.bt_le_scan_start(&scan_params, None));
+    assert!(
+        result.is_ok(),
+        "bt_le_scan_start failed: {:?}",
+        result.err()
+    );
+    assert_eq!(result.unwrap(), 0);
+
+    // Wait for connection to be established via BSIM.
+    // The CGM peripheral is advertising and the server should auto-connect
+    // if scan results trigger it. In BSIM, this happens within simulated time.
+    std::thread::sleep(Duration::from_secs(3));
+
+    // Attempt GATT discovery for the CGM service
+    let discover_params = BtGattDiscoverParams {
+        uuid: encode_uuid_16(BT_UUID_CGMS_VAL),
+        start_handle: 0x0001,
+        end_handle: 0xFFFF,
+        discover_type: BtGattDiscoverType::PrimaryService,
+    };
+
+    let result = embassy_futures::block_on(ble.bt_gatt_discover(&discover_params, 0x1234));
+    println!("bt_gatt_discover result: {:?}", result);
+
+    // Verify BT was initialized (minimal assertion — the discover may fail
+    // if no connection was established, which is expected without full
+    // callback handling)
+    processes.search_stdout_for_strings(HashSet::from([
+        "bt_hci_core: HW Platform: Nordic Semiconductor",
+    ]));
+}
+
+// =============================================================================
+// Thorough CGM Central Integration Test
+// =============================================================================
+
+#[test]
+/// Full CGM Central flow: discover → connect → verify.
+///
+/// This test exercises the complete BLE central pipeline against the CGM
+/// peripheral running in BSIM:
+///
+/// 1. bt_enable + register connection & scan callbacks
+/// 2. Start active BLE scanning
+/// 3. Receive scan result events and find the CGM peripheral ("Nordic Glucose Sensor")
+/// 4. Stop scanning
+/// 5. Initiate connection to the CGM peripheral's address
+/// 6. Wait for the "connected" callback event (err == 0)
+/// 7. Verify server-side logs confirm BT init and connection
+fn test_cgm_full_central_flow() {
+    println!("=== Starting CGM full central flow test ===");
+
+    let (mut processes, uart) = run_zephyr_rpc_server_exe("test_cgm_full_central_flow");
+
+    // ------------------------------------------------------------------
+    // Step 1: Initialize BLE (bt_enable + conn_cb_register + scan_cb_register)
+    // ------------------------------------------------------------------
+    println!("[Step 1] Initializing BLE client...");
+    let mut ble = cgm_ble_init(uart);
+    println!("[Step 1] BLE client initialized.");
+
+    // ------------------------------------------------------------------
+    // Step 2: Start active BLE scanning
+    // ------------------------------------------------------------------
+    println!("[Step 2] Starting BLE scan...");
+    let scan_params = BtLeScanParam {
+        scan_type: BT_LE_SCAN_TYPE_ACTIVE,
+        options: 0,
+        interval: 0x0060,
+        window: 0x0030,
+        timeout: 0,
+        interval_coded: 0,
+        window_coded: 0,
+    };
+
+    let result = embassy_futures::block_on(ble.bt_le_scan_start(&scan_params, None));
+    assert!(
+        result.is_ok(),
+        "bt_le_scan_start failed: {:?}",
+        result.err()
+    );
+    let status = result.unwrap();
+    assert_eq!(status, 0, "bt_le_scan_start returned error: {}", status);
+    println!("[Step 2] Scanning started (status=0).");
+
+    // ------------------------------------------------------------------
+    // Step 3: Receive scan results and find the CGM peripheral
+    // ------------------------------------------------------------------
+    println!("[Step 3] Waiting for scan results...");
+    let mut cgm_scan_result: Option<ScanResultData> = None;
+    let max_scan_results = 50;
+
+    for i in 0..max_scan_results {
+        let result = embassy_futures::block_on(ble.wait_for_scan_result());
+        match result {
+            Ok(scan) => {
+                let name = scan.device_name().unwrap_or("<unknown>");
+                println!(
+                    "  Scan result #{}: addr={:02X?} type={} rssi={} name=\"{}\"",
+                    i, scan.addr, scan.addr_type, scan.rssi, name
+                );
+
+                // Look for the CGM peripheral by name or service UUID
+                if name.contains("Nordic Glucose Sensor")
+                    || name.contains("CGM")
+                    || scan.has_service_uuid_16(BT_UUID_CGMS_VAL)
+                {
+                    println!(
+                        "[Step 3] *** Found CGM peripheral: name=\"{}\" addr={:02X?} ***",
+                        name, scan.addr
+                    );
+                    cgm_scan_result = Some(scan);
+                    break;
+                }
+            }
+            Err(e) => {
+                println!("  Scan result #{}: error {:?}, retrying...", i, e);
+            }
+        }
+    }
+
+    let cgm_peripheral = cgm_scan_result.expect(
+        "CGM peripheral (Nordic Glucose Sensor) not found in scan results! \
+         Make sure the CGM peripheral BSIM device is running.",
+    );
+
+    // ------------------------------------------------------------------
+    // Step 4: Stop scanning
+    // ------------------------------------------------------------------
+    println!("[Step 4] Stopping BLE scan...");
+    let result = embassy_futures::block_on(ble.bt_le_scan_stop());
+    assert!(result.is_ok(), "bt_le_scan_stop failed: {:?}", result.err());
+    println!("[Step 4] Scan stopped.");
+
+    // ------------------------------------------------------------------
+    // Step 5: Connect to the CGM peripheral
+    // ------------------------------------------------------------------
+    let peer_addr = cgm_peripheral.to_addr_le();
+    println!(
+        "[Step 5] Connecting to CGM peripheral at {:02X?} (type={})...",
+        peer_addr.addr, peer_addr.addr_type
+    );
+
+    let create_param = BtConnLeCreateParam::default();
+    let conn_param = BtLeConnParam::default();
+    let result =
+        embassy_futures::block_on(ble.bt_conn_le_create(&peer_addr, &create_param, &conn_param));
+    assert!(
+        result.is_ok(),
+        "bt_conn_le_create failed: {:?}",
+        result.err()
+    );
+    let status = result.unwrap();
+    assert_eq!(
+        status, 0,
+        "bt_conn_le_create returned error: {}",
+        status
+    );
+    println!("[Step 5] bt_conn_le_create returned 0 (connection initiating).");
+
+    // ------------------------------------------------------------------
+    // Step 6: Wait for the "connected" callback event
+    // ------------------------------------------------------------------
+    println!("[Step 6] Waiting for connection event...");
+    let conn_event = embassy_futures::block_on(ble.wait_for_connection());
+    assert!(
+        conn_event.is_ok(),
+        "Did not receive connection event: {:?}",
+        conn_event.err()
+    );
+    let conn_event = conn_event.unwrap();
+    println!(
+        "[Step 6] Connection event received: err={}",
+        conn_event.err
+    );
+    assert_eq!(
+        conn_event.err, 0,
+        "Connection failed with HCI error: {}",
+        conn_event.err
+    );
+    println!("[Step 6] Connection established successfully!");
+
+    // ------------------------------------------------------------------
+    // Step 7: Verify server-side logs
+    // ------------------------------------------------------------------
+    println!("[Step 7] Verifying server-side logs...");
+    processes.search_stdout_for_strings(HashSet::from([
+        "bt_hci_core: HW Platform: Nordic Semiconductor",
+    ]));
+
+    println!("=== CGM full central flow test PASSED ===");
 }

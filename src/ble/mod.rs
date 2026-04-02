@@ -22,15 +22,20 @@
 
 pub mod ble_types;
 pub mod bt_le_adv;
+pub mod cgm;
 
 pub use crate::ble::ble_types::{
     BT_LE_AD_GENERAL, BT_LE_AD_NO_BREDR, BtAddrLe, BtData, BtLeAdvParam,
+};
+pub use crate::ble::cgm::{
+    BT_UUID_CGM_FEATURE_VAL, BT_UUID_CGM_MEASUREMENT_VAL, BT_UUID_CGM_STATUS_VAL, BT_UUID_CGMS_VAL,
+    CgmMeasurement, SFloat, encode_uuid_16,
 };
 use crate::cbor_encoding::{CborError, CborPayloadBuilder};
 use crate::packet::{
     self, CommandId, DestContextId, DstGroupId, NrfRpcPacket, SrcContextId, SrcGroupId,
 };
-use crate::{AsyncTransport, RpcClient};
+use crate::{AsyncTransport, RpcClient, RpcError};
 
 const BT_RPC_GROUP_ID: u8 = 0x0;
 const RPC_UTILS_GROUP_ID: u8 = 0x1;
@@ -498,83 +503,841 @@ impl<T: AsyncTransport> Ble<T> {
         Ok(())
     }
 
-    pub async fn begin_bt_command_loop<F, Fut>(&mut self, cb: F)
-    where
-        F: Fn([u8; 256], usize) -> Fut,
-        Fut: Future<Output = ()>,
-    {
-        /*
-        loop {
-            let mut buff = [0u8; 256];
-            let packet = match self.client.receive_packet(&mut buff).await {
-                Ok(p) => p,
+    // ========================================================================
+    // Scanning
+    // ========================================================================
+
+    /// Start BLE scanning.
+    ///
+    /// Mirrors `bt_le_scan_start(const struct bt_le_scan_param *param, bt_le_scan_cb_t cb)`.
+    ///
+    /// The callback is encoded as a CBOR int32 slot (or null if None).
+    /// For CONFIG_BT_MAX_CONN=1, the server does not encode the connection
+    /// object in scan results, so the callback is simplistic.
+    ///
+    /// Wire encoding order (matching the C client):
+    ///   scan_type, options, interval, window, timeout, interval_coded, window_coded, callback
+    pub async fn bt_le_scan_start(
+        &mut self,
+        param: &BtLeScanParam,
+        callback_slot: Option<u32>,
+    ) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 64];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+
+        let builder = builder
+            .encode_uint_8(param.scan_type)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_8(param.options)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(param.interval)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(param.window)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(param.timeout)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(param.interval_coded)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(param.window_coded)
+            .map_err(|_| BleError::InvalidParameter)?;
+
+        // Encode callback: None → CBOR null, Some(slot) → CBOR int32
+        let builder = match callback_slot {
+            None => builder
+                .cbor_null()
+                .map_err(|_| BleError::InvalidParameter)?,
+            Some(slot) => builder
+                .encode_int_32(slot as i32)
+                .map_err(|_| BleError::InvalidParameter)?,
+        };
+
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtLeScanStartRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(status)
+    }
+
+    /// Stop BLE scanning.
+    ///
+    /// Wire encoding: empty CBOR payload (just null terminator).
+    pub async fn bt_le_scan_stop(&mut self) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 8];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtLeScanStopRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(status)
+    }
+
+    // ========================================================================
+    // Connection Callbacks
+    // ========================================================================
+
+    /// Register connection callbacks on the remote.
+    ///
+    /// Mirrors `bt_conn_cb_register_on_remote()`. This tells the server to
+    /// start forwarding connection events (connected, disconnected, etc.)
+    /// back to us. The payload is empty — no parameters.
+    pub async fn bt_conn_cb_register_on_remote(&mut self) -> Result<(), BleError> {
+        let mut cbor_buffer = [0u8; 8];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtConnCbRegisterOnRemoteRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        self.client
+            .send_command_void(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // GATT Discovery
+    // ========================================================================
+
+    /// Start GATT service/characteristic discovery.
+    ///
+    /// Mirrors `bt_gatt_discover(struct bt_conn *conn, struct bt_gatt_discover_params *params)`.
+    ///
+    /// Wire encoding order:
+    ///   [conn_index if MAX_CONN>1], uuid_buffer, start_handle, end_handle, type, params_pointer
+    ///
+    /// Since CONFIG_BT_MAX_CONN=1 in our BSIM setup, the conn object is NOT
+    /// encoded (it's implicit — the single active connection).
+    ///
+    /// `params_ptr` is a synthetic pointer value the server uses to match
+    /// the discovery callback back to these params. We pass a unique ID.
+    pub async fn bt_gatt_discover(
+        &mut self,
+        params: &BtGattDiscoverParams,
+        params_ptr: u64,
+    ) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 64];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+
+        // Encode UUID as a CBOR byte string (the raw struct bytes)
+        let builder = builder
+            .cbor_bytes(&params.uuid)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(params.start_handle)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(params.end_handle)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_8(params.discover_type as u8)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_64(params_ptr)
+            .map_err(|_| BleError::InvalidParameter)?;
+
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtGattDiscoverRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(status)
+    }
+
+    // ========================================================================
+    // GATT Read
+    // ========================================================================
+
+    /// Read a GATT characteristic value (single handle mode, handle_count=1).
+    ///
+    /// Mirrors `bt_gatt_read(struct bt_conn *conn, struct bt_gatt_read_params *params)`.
+    ///
+    /// Wire encoding order (handle_count == 1):
+    ///   [conn], handle_count(1), handle, offset, params_pointer
+    ///
+    /// With CONFIG_BT_MAX_CONN=1, conn is not encoded.
+    pub async fn bt_gatt_read(
+        &mut self,
+        params: &BtGattReadParams,
+        params_ptr: u64,
+    ) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 64];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+
+        let builder = builder
+            // handle_count = 1 (single read mode)
+            .encode_uint_64(1u64)
+            .map_err(|_| BleError::InvalidParameter)?
+            // single.handle
+            .encode_uint_16(params.handle)
+            .map_err(|_| BleError::InvalidParameter)?
+            // single.offset
+            .encode_uint_16(params.offset)
+            .map_err(|_| BleError::InvalidParameter)?
+            // params pointer (for callback matching)
+            .encode_uint_64(params_ptr)
+            .map_err(|_| BleError::InvalidParameter)?;
+
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtGattReadRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(status)
+    }
+
+    // ========================================================================
+    // GATT Subscribe
+    // ========================================================================
+
+    /// Subscribe to GATT notifications/indications.
+    ///
+    /// Mirrors `bt_gatt_subscribe(struct bt_conn *conn, struct bt_gatt_subscribe_params *params)`.
+    ///
+    /// Wire encoding order:
+    ///   [conn], params_pointer, has_notify(bool), subscribe_callback(null),
+    ///   value_handle, ccc_handle, value, flags
+    ///
+    /// With CONFIG_BT_MAX_CONN=1, conn is not encoded.
+    pub async fn bt_gatt_subscribe(
+        &mut self,
+        params: &BtGattSubscribeParams,
+        params_ptr: u64,
+    ) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 64];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+
+        let builder = builder
+            // params pointer (uintptr_t)
+            .encode_uint_64(params_ptr)
+            .map_err(|_| BleError::InvalidParameter)?
+            // has_notify (bool → uint8)
+            .encode_uint_8(if params.has_notify { 1 } else { 0 })
+            .map_err(|_| BleError::InvalidParameter)?
+            // subscribe callback (null = no callback)
+            .cbor_null()
+            .map_err(|_| BleError::InvalidParameter)?
+            // value_handle
+            .encode_uint_16(params.value_handle)
+            .map_err(|_| BleError::InvalidParameter)?
+            // ccc_handle
+            .encode_uint_16(params.ccc_handle)
+            .map_err(|_| BleError::InvalidParameter)?
+            // value (notification/indication flags)
+            .encode_uint_16(params.value)
+            .map_err(|_| BleError::InvalidParameter)?
+            // flags (atomic_t, typically 0)
+            .encode_uint_16(params.flags)
+            .map_err(|_| BleError::InvalidParameter)?;
+
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtGattSubscribeRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(status)
+    }
+
+    // ========================================================================
+    // Scan callback registration
+    // ========================================================================
+
+    /// Register the scan callback on the remote (server).
+    ///
+    /// Mirrors `bt_le_scan_cb_register_on_remote()`. This tells the server to
+    /// start forwarding scan result events (`BtLeScanCbRecvRpcCmd`) to us
+    /// when BLE scanning is active.
+    ///
+    /// Must be called before `bt_le_scan_start()` for the client to receive
+    /// scan results.
+    pub async fn bt_le_scan_cb_register_on_remote(&mut self) -> Result<(), BleError> {
+        let mut cbor_buffer = [0u8; 8];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtLeScanCbRegisterOnRemoteRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        self.client
+            .send_command_void(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Connection creation
+    // ========================================================================
+
+    /// Create a BLE connection to a peer.
+    ///
+    /// Mirrors `bt_conn_le_create(const bt_addr_le_t *peer,
+    ///     const struct bt_conn_le_create_param *create_param,
+    ///     const struct bt_le_conn_param *conn_param,
+    ///     struct bt_conn **conn)`.
+    ///
+    /// Wire encoding order:
+    ///   addr_type, addr_bytes, options, interval, window,
+    ///   interval_coded, window_coded, timeout,
+    ///   interval_min, interval_max, latency, conn_timeout
+    ///
+    /// With CONFIG_BT_MAX_CONN=1, the conn object is not returned over the wire.
+    /// Returns the i32 result code (0 = success, initiating connection).
+    pub async fn bt_conn_le_create(
+        &mut self,
+        peer: &BtAddrLe,
+        create_param: &BtConnLeCreateParam,
+        conn_param: &BtLeConnParam,
+    ) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 128];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+
+        // Encode bt_addr_le_t as a single 7-byte buffer: [type, addr[0..6]]
+        let mut addr_le_buf = [0u8; 7];
+        addr_le_buf[0] = peer.addr_type;
+        addr_le_buf[1..7].copy_from_slice(&peer.addr);
+
+        let builder = builder
+            // Peer address as 7-byte buffer
+            .cbor_bytes(&addr_le_buf)
+            .map_err(|_| BleError::InvalidParameter)?
+            // Create parameters
+            .encode_uint_32(create_param.options)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(create_param.interval)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(create_param.window)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(create_param.interval_coded)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(create_param.window_coded)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(create_param.timeout)
+            .map_err(|_| BleError::InvalidParameter)?
+            // Connection parameters
+            .encode_uint_16(conn_param.interval_min)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(conn_param.interval_max)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(conn_param.latency)
+            .map_err(|_| BleError::InvalidParameter)?
+            .encode_uint_16(conn_param.timeout)
+            .map_err(|_| BleError::InvalidParameter)?;
+
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtConnLeCreateRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(status)
+    }
+
+    // ========================================================================
+    // Event waiting methods
+    // ========================================================================
+
+    /// Wait for and decode a scan result event from the server.
+    ///
+    /// Blocks until a `BtLeScanCbRecvRpcCmd` Command arrives from the server.
+    /// Other event types are ACKed and skipped. Returns the decoded scan result.
+    pub async fn wait_for_scan_result(&mut self) -> Result<ScanResultData, BleError> {
+        // Each attempt may block for the transport read timeout (~5s).
+        // 10 retries → ~50s max wait.
+        let timeout_retries = 10;
+        for _i in 0..timeout_retries {
+            let mut event_buf = [0u8; 256];
+            let (cmd_id, payload_len) = match self.client.receive_server_event(&mut event_buf).await
+            {
+                Ok(result) => result,
                 Err(_) => continue,
             };
 
-            match packet.packet_type {
-                packet::TypeField::Command => match packet.payload {
-                    crate::decoding::ParsedPayload::Cbor(cbor_payload) => {
-                        let mut buff = [0u8; 256];
-                        let bytes = cbor_payload.into();
-                        buff.copy_from_slice(bytes);
-                        cb(buff, bytes.len()).await;
-                    }
-                    _ => {}
-                },
-                _ => {}
+            #[cfg(test)]
+            extern crate std;
+            #[cfg(test)]
+            std::println!(
+                "  [wait_for_scan_result] got event cmd_id={} (expect {}), payload_len={}",
+                cmd_id,
+                BleHostCommandId::BtLeScanCbRecvRpcCmd as u8,
+                payload_len,
+            );
+
+            if cmd_id == BleHostCommandId::BtLeScanCbRecvRpcCmd as u8 {
+                let payload = &event_buf[..payload_len];
+                return Self::decode_scan_result(payload);
             }
+            // Not the event we're looking for — it was already ACKed, keep waiting.
         }
-        */
+
+        Err(BleError::RpcError)
+    }
+
+    /// Wait for a connection event from the server.
+    ///
+    /// Blocks until a `BtConnCbConnectedCallRpcCmd` Command arrives. Other
+    /// events (e.g., scan results still flowing) are ACKed and skipped.
+    pub async fn wait_for_connection(&mut self) -> Result<ConnectionEvent, BleError> {
+        // Each attempt may block for the transport read timeout (~5s).
+        // 10 retries → ~50s max wait.
+        let timeout_retries = 10;
+        for _i in 0..timeout_retries {
+            let mut event_buf = [0u8; 256];
+            let (cmd_id, payload_len) = match self.client.receive_server_event(&mut event_buf).await
+            {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
+
+            #[cfg(test)]
+            extern crate std;
+            #[cfg(test)]
+            std::println!(
+                "  [wait_for_connection] got event cmd_id={} (expect {}), payload_len={}",
+                cmd_id,
+                BleHostCommandId::BtConnCbConnectedCallRpcCmd as u8,
+                payload_len,
+            );
+
+            if cmd_id == BleHostCommandId::BtConnCbConnectedCallRpcCmd as u8 {
+                let payload = &event_buf[..payload_len];
+                let mut decoder = minicbor::decode::Decoder::new(payload);
+                // With CONFIG_BT_MAX_CONN=1, bt_rpc_encode_bt_conn encodes
+                // nothing (conn index is implicit). Only the err field is present.
+                let err = decoder.u8().map_err(|_| BleError::RpcError)?;
+                return Ok(ConnectionEvent { err });
+            }
+            // Not a connection event — already ACKed, continue waiting.
+        }
+
+        Err(BleError::RpcError)
+    }
+
+    // ========================================================================
+    // Internal event decoders
+    // ========================================================================
+
+    /// Decode a scan result from raw CBOR payload.
+    ///
+    /// Wire format (encoded by the server):
+    ///   scratchpad_size(uint), bt_addr_le_t(bytes[7]: type+addr),
+    ///   sid(u8), rssi(i8), tx_power(i8), adv_type(u8), adv_props(u16),
+    ///   interval(u16), primary_phy(u8), secondary_phy(u8), ad_data(bytes)
+    fn decode_scan_result(payload: &[u8]) -> Result<ScanResultData, BleError> {
+        let mut d = minicbor::decode::Decoder::new(payload);
+
+        // First field is scratchpad_size — skip it.
+        let _scratchpad_size = d.u32().map_err(|_| BleError::RpcError)?;
+
+        // bt_addr_le_t is encoded as a 7-byte buffer: [type, addr[0..6]]
+        let addr_le_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+        if addr_le_bytes.len() < 7 {
+            return Err(BleError::RpcError);
+        }
+        let addr_type = addr_le_bytes[0];
+        let mut addr = [0u8; 6];
+        addr.copy_from_slice(&addr_le_bytes[1..7]);
+
+        let sid = d.u8().map_err(|_| BleError::RpcError)?;
+        let rssi = d.i8().map_err(|_| BleError::RpcError)?;
+        let tx_power = d.i8().map_err(|_| BleError::RpcError)?;
+        let adv_type = d.u8().map_err(|_| BleError::RpcError)?;
+        let adv_props = d.u16().map_err(|_| BleError::RpcError)?;
+        let interval = d.u16().map_err(|_| BleError::RpcError)?;
+        let primary_phy = d.u8().map_err(|_| BleError::RpcError)?;
+        let secondary_phy = d.u8().map_err(|_| BleError::RpcError)?;
+        let ad_data_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+
+        let mut ad_data = [0u8; 64];
+        let ad_len = core::cmp::min(ad_data_bytes.len(), 64);
+        ad_data[..ad_len].copy_from_slice(&ad_data_bytes[..ad_len]);
+
+        Ok(ScanResultData {
+            addr_type,
+            addr,
+            sid,
+            rssi,
+            tx_power,
+            adv_type,
+            adv_props,
+            interval,
+            primary_phy,
+            secondary_phy,
+            ad_data,
+            ad_data_len: ad_len,
+        })
+    }
+
+    // ========================================================================
+    // Raw packet receive (for receiving callback events from server)
+    // ========================================================================
+
+    /// Receive and return raw bytes from the transport.
+    ///
+    /// This is a low-level helper for tests that need to observe server-initiated
+    /// events (e.g., scan results, connection events, GATT notifications) which
+    /// arrive asynchronously. Returns the number of bytes read.
+    pub async fn receive_raw(&mut self, buffer: &mut [u8]) -> Result<usize, BleError> {
+        self.client
+            .transport_read(buffer)
+            .await
+            .map_err(|_| BleError::RpcError)
     }
 }
 
-/** LE scan parameters */
-struct bt_le_scan_param {
-    /** Scan type. @ref BT_LE_SCAN_TYPE_ACTIVE or @ref BT_LE_SCAN_TYPE_PASSIVE. */
+/// LE scan parameters matching Zephyr's `struct bt_le_scan_param`.
+#[derive(Debug, Clone, Copy)]
+pub struct BtLeScanParam {
+    /// Scan type: 0 = passive, 1 = active.
     pub scan_type: u8,
-
-    /** Bit-field of scanning options. */
+    /// Bit-field of scanning options.
     pub options: u8,
-
-    /** Scan interval (N * 0.625 ms).
-     *
-     * @note When @kconfig{CONFIG_BT_SCAN_AND_INITIATE_IN_PARALLEL} is enabled
-     *       and the application wants to scan and connect in parallel,
-     *       the Bluetooth Controller may require the scan interval used
-     *       for scanning and connection establishment to be equal to
-     *       obtain the best performance.
-     */
+    /// Scan interval (N * 0.625 ms).
     pub interval: u16,
-
-    /** Scan window (N * 0.625 ms)
-     *
-     * @note When @kconfig{CONFIG_BT_SCAN_AND_INITIATE_IN_PARALLEL} is enabled
-     *       and the application wants to scan and connect in parallel,
-     *       the Bluetooth Controller may require the scan window used
-     *       for scanning and connection establishment to be equal to
-     *       obtain the best performance.
-     */
+    /// Scan window (N * 0.625 ms).
     pub window: u16,
-
-    /**
-     * @brief Scan timeout (N * 10 ms)
-     *
-     * Application will be notified by the scan timeout callback.
-     * Set zero to disable timeout.
-     */
+    /// Scan timeout (N * 10 ms). 0 = no timeout.
     pub timeout: u16,
-
-    /**
-     * @brief Scan interval LE Coded PHY (N * 0.625 MS)
-     *
-     * Set zero to use same as LE 1M PHY scan interval.
-     */
+    /// Scan interval LE Coded PHY (N * 0.625 ms). 0 = same as 1M.
     pub interval_coded: u16,
-
-    /**
-     * @brief Scan window LE Coded PHY (N * 0.625 MS)
-     *
-     * Set zero to use same as LE 1M PHY scan window.
-     */
+    /// Scan window LE Coded PHY (N * 0.625 ms). 0 = same as 1M.
     pub window_coded: u16,
+}
+
+impl Default for BtLeScanParam {
+    fn default() -> Self {
+        Self {
+            scan_type: 1, // Active scan
+            options: 0,
+            interval: 0x0060, // 60ms
+            window: 0x0030,   // 30ms
+            timeout: 0,
+            interval_coded: 0,
+            window_coded: 0,
+        }
+    }
+}
+
+/// BLE scan type constants
+pub const BT_LE_SCAN_TYPE_PASSIVE: u8 = 0;
+pub const BT_LE_SCAN_TYPE_ACTIVE: u8 = 1;
+
+/// GATT discover types matching Zephyr's `enum bt_gatt_discover_type`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub enum BtGattDiscoverType {
+    /// Discover Primary Services
+    PrimaryService = 0,
+    /// Discover Secondary Services
+    SecondaryService = 1,
+    /// Discover Included Services
+    Include = 2,
+    /// Discover Characteristics
+    Characteristic = 3,
+    /// Discover Descriptors
+    Descriptor = 4,
+    /// Discover Attributes (any type)
+    Attribute = 5,
+    /// Discover Standard Characteristic Descriptor
+    StdCharDesc = 6,
+}
+
+/// Parameters for GATT discovery.
+pub struct BtGattDiscoverParams {
+    /// UUID to discover. Encoded as raw bytes (Zephyr struct format).
+    pub uuid: [u8; 3], // For 16-bit UUIDs: [type, lo, hi]
+    /// Start handle for discovery range.
+    pub start_handle: u16,
+    /// End handle for discovery range.
+    pub end_handle: u16,
+    /// Discovery type.
+    pub discover_type: BtGattDiscoverType,
+}
+
+/// Parameters for GATT read (single handle mode).
+pub struct BtGattReadParams {
+    /// Handle to read from.
+    pub handle: u16,
+    /// Offset within the attribute value.
+    pub offset: u16,
+}
+
+/// Parameters for GATT subscribe (notifications/indications).
+pub struct BtGattSubscribeParams {
+    /// Whether a notify callback is present.
+    pub has_notify: bool,
+    /// Value handle of the characteristic.
+    pub value_handle: u16,
+    /// CCC descriptor handle.
+    pub ccc_handle: u16,
+    /// Subscription value: 1 = notifications, 2 = indications.
+    pub value: u16,
+    /// Atomic flags (typically 0).
+    pub flags: u16,
+}
+
+/// CCC value for enabling notifications
+pub const BT_GATT_CCC_NOTIFY: u16 = 0x0001;
+
+/// CCC value for enabling indications
+pub const BT_GATT_CCC_INDICATE: u16 = 0x0002;
+
+// ============================================================================
+// BLE Event types (decoded from server-initiated Command packets)
+// ============================================================================
+
+/// Scan result data decoded from a BtLeScanCbRecvRpcCmd event.
+#[derive(Debug, Clone)]
+pub struct ScanResultData {
+    /// Address type (e.g., 0x00 = public, 0x01 = random).
+    pub addr_type: u8,
+    /// 6-byte BLE address (little-endian, as on the wire).
+    pub addr: [u8; 6],
+    /// SID (advertising set identifier).
+    pub sid: u8,
+    /// Received signal strength (dBm).
+    pub rssi: i8,
+    /// Transmit power (dBm).
+    pub tx_power: i8,
+    /// Advertising PDU type.
+    pub adv_type: u8,
+    /// Advertising properties bitmask.
+    pub adv_props: u16,
+    /// Advertising interval.
+    pub interval: u16,
+    /// Primary PHY.
+    pub primary_phy: u8,
+    /// Secondary PHY.
+    pub secondary_phy: u8,
+    /// Raw advertising data (AD structures).
+    pub ad_data: [u8; 64],
+    /// Number of valid bytes in `ad_data`.
+    pub ad_data_len: usize,
+}
+
+impl ScanResultData {
+    /// Parse the device name from advertising data (AD type 0x08 = Shortened, 0x09 = Complete Local Name).
+    pub fn device_name(&self) -> Option<&str> {
+        let data = &self.ad_data[..self.ad_data_len];
+        let mut i = 0;
+        while i < data.len() {
+            let len = data[i] as usize;
+            if len == 0 || i + 1 + len > data.len() {
+                break;
+            }
+            let ad_type = data[i + 1];
+            if ad_type == 0x08 || ad_type == 0x09 {
+                return core::str::from_utf8(&data[i + 2..i + 1 + len]).ok();
+            }
+            i += len + 1;
+        }
+        None
+    }
+
+    /// Check if a 16-bit service UUID is present in the advertising data
+    /// (AD types 0x02 = Incomplete or 0x03 = Complete List of 16-bit Service UUIDs).
+    pub fn has_service_uuid_16(&self, uuid: u16) -> bool {
+        let data = &self.ad_data[..self.ad_data_len];
+        let mut i = 0;
+        while i < data.len() {
+            let len = data[i] as usize;
+            if len == 0 || i + 1 + len > data.len() {
+                break;
+            }
+            let ad_type = data[i + 1];
+            if ad_type == 0x02 || ad_type == 0x03 {
+                // Each UUID is 2 bytes (little-endian)
+                let uuid_data = &data[i + 2..i + 1 + len];
+                let mut j = 0;
+                while j + 1 < uuid_data.len() {
+                    let found = u16::from_le_bytes([uuid_data[j], uuid_data[j + 1]]);
+                    if found == uuid {
+                        return true;
+                    }
+                    j += 2;
+                }
+            }
+            i += len + 1;
+        }
+        false
+    }
+
+    /// Convert the address into a `BtAddrLe` for use with `bt_conn_le_create`.
+    pub fn to_addr_le(&self) -> BtAddrLe {
+        BtAddrLe {
+            addr_type: self.addr_type,
+            addr: self.addr,
+        }
+    }
+}
+
+/// Connection event data from BtConnCbConnectedCallRpcCmd.
+#[derive(Debug, Clone)]
+pub struct ConnectionEvent {
+    /// HCI error code. 0 = success.
+    pub err: u8,
+}
+
+/// Disconnection event data from BtConnCbDisconnectedCallRpcCmd.
+#[derive(Debug, Clone)]
+pub struct DisconnectionEvent {
+    /// HCI reason code.
+    pub reason: u8,
+}
+
+// ============================================================================
+// Connection create parameters
+// ============================================================================
+
+/// Parameters for `bt_conn_le_create` — controls scanning behavior during connection.
+#[derive(Debug, Clone, Copy)]
+pub struct BtConnLeCreateParam {
+    /// Options bitmask (BT_CONN_LE_OPT_*).
+    pub options: u32,
+    /// Scan interval (N * 0.625 ms).
+    pub interval: u16,
+    /// Scan window (N * 0.625 ms).
+    pub window: u16,
+    /// Scan interval for LE Coded PHY. 0 = same as 1M.
+    pub interval_coded: u16,
+    /// Scan window for LE Coded PHY. 0 = same as 1M.
+    pub window_coded: u16,
+    /// Connection initiation timeout (N * 10 ms). 0 = no timeout.
+    pub timeout: u16,
+}
+
+impl Default for BtConnLeCreateParam {
+    fn default() -> Self {
+        Self {
+            options: 0,
+            interval: 0x0060, // 60ms
+            window: 0x0030,   // 30ms
+            interval_coded: 0,
+            window_coded: 0,
+            timeout: 0,
+        }
+    }
+}
+
+/// LE connection parameters for `bt_conn_le_create`.
+#[derive(Debug, Clone, Copy)]
+pub struct BtLeConnParam {
+    /// Minimum connection interval (N * 1.25 ms).
+    pub interval_min: u16,
+    /// Maximum connection interval (N * 1.25 ms).
+    pub interval_max: u16,
+    /// Peripheral latency (number of connection events to skip).
+    pub latency: u16,
+    /// Supervision timeout (N * 10 ms).
+    pub timeout: u16,
+}
+
+impl Default for BtLeConnParam {
+    fn default() -> Self {
+        Self {
+            interval_min: 24, // 30 ms
+            interval_max: 40, // 50 ms
+            latency: 0,
+            timeout: 400, // 4 s
+        }
+    }
 }
