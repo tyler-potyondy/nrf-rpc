@@ -75,8 +75,11 @@
 //!     rejected as a duplicate.
 
 use crate::{
-    AsyncTransport, TransportError,
-    transport::{RpcRxTransportBuffer, RpcTxTransportBuffer, TransportBuffer},
+    AsyncTransport,
+    transport::{
+        DecodedTransportPacket, EncodedTransportPacket, RpcRxTransportPacket, RpcTxTransportPacket,
+        TransportBuffer,
+    },
 };
 
 /// nRF RPC UART Escape Byte.
@@ -89,16 +92,37 @@ pub trait Uart: AsyncTransport {}
 pub trait UartTransportBufferStatus {}
 
 struct EncodingInProgress;
-struct Encoded;
-struct Decoded;
+pub struct Encoded;
+pub struct Decoded;
 struct DecodingInProgress;
 struct UncheckedEncoded;
 
-pub struct UartTxTransport<'a, const N: usize> {
-    inner: UartTransportBuffer<'a, N, EncodingInProgress>,
+pub struct UartTxTransport<'a> {
+    inner: UartTransportBuffer<'a, EncodingInProgress>,
 }
 
-impl<'a, const N: usize> RpcTxTransportBuffer<'a, N> for UartTxTransport<'a, N> {
+impl<'a> UartTxTransport<'a> {
+    fn new(buffer: &'a mut [u8]) -> Self {
+        Self {
+            inner: UartTransportBuffer::<'_, EncodingInProgress>::new(buffer),
+        }
+    }
+
+    fn encode(self) -> Result<UartTransportBuffer<'a, Encoded>, ()> {
+        self.inner.complete_encoding()
+    }
+}
+
+impl<'a> From<UartTransportBuffer<'a, Encoded>> for &'a mut [u8] {
+    fn from(value: UartTransportBuffer<'a, Encoded>) -> Self {
+        value.buf.into()
+    }
+}
+
+impl<'a> EncodedTransportPacket<'a> for UartTransportBuffer<'a, Encoded> {}
+
+impl<'a> RpcTxTransportPacket<'a> for UartTxTransport<'a> {
+    type EncodedTransportPacket = UartTransportBuffer<'a, Encoded>;
     fn write_slice_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
         self.inner.write_slice_into_or_err(data)
     }
@@ -107,38 +131,74 @@ impl<'a, const N: usize> RpcTxTransportBuffer<'a, N> for UartTxTransport<'a, N> 
         self.inner.write_byte_into_or_err(data)
     }
 
-    fn new(buffer: &'a mut [u8; N]) -> Self {
+    fn new(buffer: &'a mut [u8]) -> Self {
+        UartTxTransport::new(buffer)
+    }
+
+    fn encode_packet(self) -> Result<Self::EncodedTransportPacket, ()> {
+        self.encode()
+    }
+}
+
+pub struct UartRxTransport<'a> {
+    inner: UartTransportBuffer<'a, UncheckedEncoded>,
+}
+
+impl<'a> UartRxTransport<'a> {
+    fn new(buffer: &'a mut [u8]) -> Self {
         Self {
-            inner: UartTransportBuffer::<'_, N, EncodingInProgress>::new(buffer),
+            inner: UartTransportBuffer::<'_, UncheckedEncoded>::new(buffer),
         }
     }
-}
 
-impl<'a, const N: usize> TryFrom<UartTxTransport<'a, N>> for &'a mut [u8] {
-    type Error = ();
-
-    fn try_from(value: UartTxTransport<'a, N>) -> Result<Self, Self::Error> {
-        value.inner.try_into()
+    fn decode(self) -> Result<UartTransportBuffer<'a, Decoded>, ()> {
+        self.inner.decode()
     }
 }
 
-pub struct UartRxTransport<'a, const N: usize> {
-    inner: UartTransportBuffer<'a, N, UncheckedEncoded>,
+impl<'a> DecodedTransportPacket<'a> for UartTransportBuffer<'a, Decoded> {}
+impl<'a> From<UartTransportBuffer<'a, Decoded>> for &'a mut [u8] {
+    fn from(value: UartTransportBuffer<'a, Decoded>) -> Self {
+        value.buf.into()
+    }
 }
 
-impl<'a, const N: usize> RpcRxTransportBuffer<'a, N> for UartRxTransport<'a, N> {
-    fn new(buffer: &'a mut [u8; N]) -> Self {
-        Self {
-            inner: UartTransportBuffer::<'_, N, UncheckedEncoded>::new(buffer),
+impl<'a> RpcRxTransportPacket<'a> for UartRxTransport<'a> {
+    type DecodedTransportPacket = UartTransportBuffer<'a, Decoded>;
+    fn new(buffer: &'a mut [u8]) -> Result<(Self, Option<&'a mut [u8]>), (&'a mut [u8], ())> {
+        // Consume from opening delimiter byte to closing delimiter byte.
+        let mut start_ind = 0;
+        let mut closing_ind = 0;
+        let mut found_start = false;
+
+        for (index, byte) in buffer.iter().enumerate() {
+            if *byte == DELIMITER {
+                if found_start {
+                    closing_ind = index;
+                    break;
+                } else {
+                    start_ind = index;
+                    found_start = true;
+                }
+            }
         }
+
+        if !found_start {
+            // No delimiter byte found, return error with original buffer.
+            return Err((buffer, ()));
+        }
+
+        // Split buffer into two slices: the packet (start_ind..=closing_ind) and the remaining data after.
+        let (packet_and_before, remaining_buffer) = buffer.split_at_mut(closing_ind + 1);
+        let processing_buffer: &mut [u8] = &mut packet_and_before[start_ind..];
+
+        let transport_buf = UartRxTransport::new(processing_buffer);
+
+        Ok((transport_buf, Some(remaining_buffer)))
     }
-}
 
-impl<'a, const N: usize> TryFrom<UartRxTransport<'a, N>> for &'a mut [u8] {
-    type Error = ();
-
-    fn try_from(value: UartRxTransport<'a, N>) -> Result<Self, Self::Error> {
-        value.inner.try_into()
+    fn decode_raw_packet(self) -> Result<Self::DecodedTransportPacket, ()> {
+        self.decode()
     }
 }
 
@@ -148,17 +208,17 @@ impl UartTransportBufferStatus for Decoded {}
 impl UartTransportBufferStatus for DecodingInProgress {}
 impl UartTransportBufferStatus for UncheckedEncoded {}
 
-struct UartTransportBuffer<'a, const N: usize, S: UartTransportBufferStatus> {
-    buf: TransportBuffer<'a, N>,
+pub struct UartTransportBuffer<'a, S: UartTransportBufferStatus> {
+    buf: TransportBuffer<'a>,
     crc: u16,
     status: core::marker::PhantomData<S>,
 }
 
-impl<'a, const N: usize> UartTransportBuffer<'a, N, EncodingInProgress> {
+impl<'a> UartTransportBuffer<'a, EncodingInProgress> {
     /// Create a new InProgress UartTransportBuffer.
     ///
     /// Initialize the CRC to 0xffff and the status to InProgress.
-    pub fn new(buf: &'a mut [u8; N]) -> Self {
+    pub fn new(buf: &'a mut [u8]) -> Self {
         let mut output = Self {
             buf: TransportBuffer::new(buf),
             crc: 0xffff,
@@ -229,35 +289,25 @@ impl<'a, const N: usize> UartTransportBuffer<'a, N, EncodingInProgress> {
     }
 }
 
-impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, UncheckedEncoded>>
-    for UartTransportBuffer<'a, N, Decoded>
-{
-    type Error = ();
-
-    fn try_from(value: UartTransportBuffer<'a, N, UncheckedEncoded>) -> Result<Self, Self::Error> {
-        let encoding_in_progress = value.consume_opening_delimiter_byte()?;
-        encoding_in_progress.try_into()
+impl<'a> UartTransportBuffer<'a, UncheckedEncoded> {
+    fn decode(self) -> Result<UartTransportBuffer<'a, Decoded>, ()> {
+        let decoding_in_progress = self.consume_opening_delimiter_byte()?;
+        decoding_in_progress.complete_decoding()
     }
 }
 
-impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, DecodingInProgress>>
-    for UartTransportBuffer<'a, N, Decoded>
-{
-    type Error = ();
-
-    fn try_from(
-        mut value: UartTransportBuffer<'a, N, DecodingInProgress>,
-    ) -> Result<Self, Self::Error> {
-        let mut output = [0; N];
+impl<'a> UartTransportBuffer<'a, DecodingInProgress> {
+    fn complete_decoding(mut self) -> Result<UartTransportBuffer<'a, Decoded>, ()> {
+        let mut output = [0u8; 256];
         let mut write_pos = 0;
 
         // This is for all intensive purposes, a while loop until the
         // break, but we know that we should never read more than N bytes,
         // so to prevent a potential infinite loop, we use a for loop instead.
-        for _ in 0..N {
-            let byte = value.buf.read_byte_or_err()?;
+        for _ in 0..self.buf.full_len() {
+            let byte = self.buf.read_byte_or_err()?;
             if byte == ESCAPE {
-                let next_byte = value.buf.read_byte_or_err()?;
+                let next_byte = self.buf.read_byte_or_err()?;
                 output[write_pos] = next_byte ^ 0x20;
             } else if byte == DELIMITER {
                 break;
@@ -285,15 +335,11 @@ impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, DecodingInProgress>>
             u16::from_le_bytes([output[output_len - 2], output[output_len - 1]]);
 
         if crc != received_crc {
-            // todo: remove panic and add error handling
-            panic!(
-                "CRC mismatch: expected 0x{:04x}, got 0x{:04x}",
-                crc, received_crc
-            );
+            // todo: add error handling
             return Err(());
         }
 
-        let buf = value
+        let buf = self
             .buf
             .reset_with_new_slice(&output[..output_len - 2])
             .expect("Failed to reset buffer");
@@ -306,14 +352,8 @@ impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, DecodingInProgress>>
     }
 }
 
-impl<'a, const N: usize> From<UartTransportBuffer<'a, N, Decoded>> for &'a mut [u8] {
-    fn from(value: UartTransportBuffer<'a, N, Decoded>) -> Self {
-        value.buf.into()
-    }
-}
-
-impl<'a, const N: usize> UartTransportBuffer<'a, N, UncheckedEncoded> {
-    pub fn new(input_buffer: &'a mut [u8; N]) -> Self {
+impl<'a> UartTransportBuffer<'a, UncheckedEncoded> {
+    pub fn new(input_buffer: &'a mut [u8]) -> Self {
         Self {
             buf: TransportBuffer::from(input_buffer),
             crc: 0xffff,
@@ -323,7 +363,7 @@ impl<'a, const N: usize> UartTransportBuffer<'a, N, UncheckedEncoded> {
 
     fn consume_opening_delimiter_byte(
         mut self,
-    ) -> Result<UartTransportBuffer<'a, N, DecodingInProgress>, ()> {
+    ) -> Result<UartTransportBuffer<'a, DecodingInProgress>, ()> {
         if self.buf.read_byte_or_err()? != DELIMITER {
             return Err(());
         }
@@ -336,9 +376,8 @@ impl<'a, const N: usize> UartTransportBuffer<'a, N, UncheckedEncoded> {
     }
 }
 
-impl<'a, const N: usize> RpcTxTransportBuffer<'a, N>
-    for UartTransportBuffer<'a, N, EncodingInProgress>
-{
+/*
+impl<'a> RpcTxTransportPacket<'a> for UartTransportBuffer<'a, EncodingInProgress> {
     fn write_slice_into_or_err(&mut self, data: &[u8]) -> Result<(), ()> {
         self.write_slice_into_or_err(data)
     }
@@ -347,57 +386,27 @@ impl<'a, const N: usize> RpcTxTransportBuffer<'a, N>
         self.write_byte_into_or_err(data)
     }
 
-    fn new(buffer: &'a mut [u8; N]) -> Self {
+    fn new(buffer: &'a mut [u8]) -> Self {
         Self::new(buffer)
     }
-}
 
-impl<'a, const N: usize> TryFrom<UartTransportBuffer<'a, N, EncodingInProgress>>
-    for UartTransportBuffer<'a, N, Encoded>
-{
-    type Error = ();
 
+}*/
+
+impl<'a> UartTransportBuffer<'a, EncodingInProgress> {
     /// Attempt to convert InProgress UartTransportBuffer to Encoded UartTransportBuffer.
     ///
     /// Write checksum bytes and delimiter byte to the buffer; may fail if there is
     /// not enough space in the buffer.
-    fn try_from(
-        mut value: UartTransportBuffer<'a, N, EncodingInProgress>,
-    ) -> Result<Self, Self::Error> {
-        value.write_checksum_bytes()?;
-        value.write_delimiter_byte()?;
+    fn complete_encoding(mut self) -> Result<UartTransportBuffer<'a, Encoded>, ()> {
+        self.write_checksum_bytes()?;
+        self.write_delimiter_byte()?;
 
-        Ok(Self {
-            buf: value.buf,
-            crc: value.crc,
+        Ok(UartTransportBuffer {
+            buf: self.buf,
+            crc: self.crc,
             status: core::marker::PhantomData,
         })
-    }
-}
-/// Consume Encoded UartTransportBuffer to slice of bytes.
-impl<'a, const N: usize> From<UartTransportBuffer<'a, N, Encoded>> for &'a mut [u8] {
-    fn from(value: UartTransportBuffer<'a, N, Encoded>) -> Self {
-        value.buf.into()
-    }
-}
-
-/// Attempt to convert InProgress UartTransportBuffer to slice of bytes via first
-/// converting to Encoded UartTransportBuffer.
-impl<'a, const N: usize> TryInto<&'a mut [u8]> for UartTransportBuffer<'a, N, EncodingInProgress> {
-    type Error = ();
-
-    fn try_into(self) -> Result<&'a mut [u8], Self::Error> {
-        let ready_buffer: UartTransportBuffer<'a, N, Encoded> = self.try_into()?;
-        Ok(ready_buffer.into())
-    }
-}
-
-impl<'a, const N: usize> TryInto<&'a mut [u8]> for UartTransportBuffer<'a, N, UncheckedEncoded> {
-    type Error = ();
-
-    fn try_into(self) -> Result<&'a mut [u8], Self::Error> {
-        let decoded_buffer: UartTransportBuffer<'a, N, Decoded> = self.try_into()?;
-        Ok(decoded_buffer.into())
     }
 }
 
@@ -469,14 +478,13 @@ mod tests {
 
          */
         let mut buf = [0; 200];
-        let mut transport_buffer =
-            UartTransportBuffer::<'_, 200, EncodingInProgress>::new(&mut buf);
+        let mut transport_buffer = UartTransportBuffer::<'_, EncodingInProgress>::new(&mut buf);
         transport_buffer
             .write_slice_into_or_err(&[0x80, 0x01, 0xff, 0x00, 0x00, 0x61, 0x7e, 0xf6])
             .expect("Failed to write slice");
 
-        let ready_buffer: UartTransportBuffer<'_, 200, Encoded> = transport_buffer
-            .try_into()
+        let ready_buffer: UartTransportBuffer<'_, Encoded> = transport_buffer
+            .complete_encoding()
             .expect("Failed to convert to ready buffer");
 
         let ready_buffer_slice: &mut [u8] = ready_buffer.into();
@@ -496,11 +504,11 @@ mod tests {
             0x7e, 0x80, 0x01, 0xff, 0x00, 0x00, 0x61, 0x7d, 0x5e, 0xf6, 0x6d, 0x72, 0x7e,
         ];
 
-        let input_buffer: UartTransportBuffer<'_, 13, UncheckedEncoded> =
-            UartTransportBuffer::<'_, 13, UncheckedEncoded>::new(&mut encoded_buffer);
+        let input_buffer: UartTransportBuffer<'_, UncheckedEncoded> =
+            UartTransportBuffer::<'_, UncheckedEncoded>::new(&mut encoded_buffer);
 
-        let decoded_buffer: UartTransportBuffer<'_, 13, Decoded> = input_buffer
-            .try_into()
+        let decoded_buffer: UartTransportBuffer<'_, Decoded> = input_buffer
+            .decode()
             .expect("Failed to convert to decoded buffer");
 
         let decoded_buffer_slice: &mut [u8] = decoded_buffer.into();
@@ -515,12 +523,14 @@ mod tests {
             0x6F, 0x72, 0x64, 0x69, 0x63, 0x5F, 0x50, 0x53, 0xF6, 0x7d, 0x5e, 0x44, 0x7E,
         ];
 
-        let input_buffer: UartTransportBuffer<'_, 41, UncheckedEncoded> =
-            UartTransportBuffer::<'_, 41, UncheckedEncoded>::new(&mut input_buffer);
+        let input_buffer: UartTransportBuffer<'_, UncheckedEncoded> =
+            UartTransportBuffer::<'_, UncheckedEncoded>::new(&mut input_buffer);
 
-        let decoded_buffer_slice: &mut [u8] = input_buffer
-            .try_into()
+        let decoded_buffer = input_buffer
+            .decode()
             .expect("Failed to convert to decoded buffer");
+
+        let decoded_buffer_slice: &mut [u8] = decoded_buffer.into();
 
         const EXPECTED_DECODED_BUFFER: [u8; 36] = [
             0x80, 0x04, 0xff, 0x00, 0x00, 0x18, 0x20, 0x00, 0x00, 0x00, 0x03, 0x18, 0xA0, 0x18,

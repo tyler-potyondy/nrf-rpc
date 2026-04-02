@@ -20,12 +20,17 @@
 //! ble.bt_le_adv_start(&param, &ad, &sd).await?;
 //! ```
 
-pub use crate::ble_types::{BT_LE_AD_GENERAL, BT_LE_AD_NO_BREDR, BtAddrLe, BtData, BtLeAdvParam};
+pub mod ble_types;
+pub mod bt_le_adv;
+
+pub use crate::ble::ble_types::{
+    BT_LE_AD_GENERAL, BT_LE_AD_NO_BREDR, BtAddrLe, BtData, BtLeAdvParam,
+};
 use crate::cbor_encoding::{CborError, CborPayloadBuilder};
 use crate::packet::{
     self, CommandId, DestContextId, DstGroupId, NrfRpcPacket, SrcContextId, SrcGroupId,
 };
-use crate::{AsyncTransport, RpcClient, RpcError};
+use crate::{AsyncTransport, RpcClient};
 
 const BT_RPC_GROUP_ID: u8 = 0x0;
 const RPC_UTILS_GROUP_ID: u8 = 0x1;
@@ -33,7 +38,7 @@ const RPC_UTILS_GROUP_ID: u8 = 0x1;
 // ============================================================================
 // Ble Struct
 // ============================================================================
-
+#[allow(dead_code)]
 #[repr(u8)]
 enum BleClientCommandId {
     /* bluetooth.h API */
@@ -157,6 +162,7 @@ enum BleClientCommandId {
 
 /// Host commands IDs used in bluetooth API serialization.
 /// These commands are sent from the host to the client.
+#[allow(dead_code)]
 #[repr(u8)]
 enum BleHostCommandId {
     /* bluetooth.h API */
@@ -211,9 +217,18 @@ enum BleHostCommandId {
     BtGattSubscribeParamsSubscribeRpcCmd,
 }
 
+use crate as nrf_rpc;
+use nrf_rpc_codegen::rpc_from_c;
+
+// rpc_from_c!(
+//     cmd = "BtEnableRpcCmd",
+//     sig = "int bt_enable(bt_ready_cb_t cb)"
+// );
+
 /// BLE RPC client
 ///
 /// Encapsulates an RPC client for Bluetooth Low Energy operations.
+#[rpc_from_c((cmd = "BtEnableRpcCmd", sig = "int bt_enable(bt_ready_cb_t cb)"))]
 pub struct Ble<T: AsyncTransport> {
     client: RpcClient<T>,
 }
@@ -255,6 +270,7 @@ impl<T: AsyncTransport> Ble<T> {
         Ok(Self { client })
     }
 
+    /*
     /// Enable Bluetooth (TODO) add zephyr doc comments HERE
     ///
     /// # Example
@@ -330,7 +346,7 @@ impl<T: AsyncTransport> Ble<T> {
         //     .expect("Failed to send command and get i32");
 
         Ok(())
-    }
+    }*/
 
     pub async fn bt_le_adv_start(&mut self) -> Result<(), BleError> {
         // Mirror the Zephyr bt_le_adv_start RPC encoding.
@@ -473,40 +489,13 @@ impl<T: AsyncTransport> Ble<T> {
             .client
             .send_command_and_get_i32(packet)
             .await
-            .expect("Failed to send command and get i32");
+            .map_err(|_| BleError::RpcError)?;
 
         if status != 0 {
             return Err(BleError::RpcError);
         }
 
         Ok(())
-    }
-
-    pub async fn begin_bt_command_loop<F, Fut>(&mut self, cb: F)
-    where
-        F: Fn([u8; 256], usize) -> Fut,
-        Fut: Future<Output = ()>,
-    {
-        loop {
-            let mut buff = [0u8; 256];
-            let packet = match self.client.receive_packet(&mut buff).await {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            match packet.packet_type {
-                packet::TypeField::Command => match packet.payload {
-                    crate::decoding::ParsedPayload::Cbor(cbor_payload) => {
-                        let mut buff = [0u8; 256];
-                        let bytes = cbor_payload.into();
-                        buff.copy_from_slice(bytes);
-                        cb(buff, bytes.len()).await;
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
     }
 }
 

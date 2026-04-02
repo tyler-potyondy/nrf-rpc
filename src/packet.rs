@@ -462,7 +462,7 @@ impl<'a, P: NrfRpcPacketType<'a>> NrfRpcPacket<'a, P> {
 
     /// Provided an RpcTransportBuffer, copy the formed nrf rpc packet into the
     /// buffer. Returns Result<(), ErrorCode>.
-    pub fn write_into<'b, const N: usize, T: crate::transport::RpcTxTransportBuffer<'b, N>>(
+    pub fn write_into<'b, T: crate::transport::RpcTxTransportPacket<'b>>(
         self,
         buf: &mut T,
     ) -> Result<(), ()> {
