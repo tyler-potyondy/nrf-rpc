@@ -16,6 +16,10 @@ env:
   # Force source build on weekly schedule or if setup files changed
   FORCE_SOURCE_BUILD: ${{ (github.event.schedule == '0 3 * * 0') || contains(github.event.head_commit.modified, '.github/workflows/') || contains(github.event.head_commit.modified, 'tests/zephyr_setup.sh') }}
 
+permissions:
+  contents: read
+  packages: read  # pull devcontainer image from GHCR
+
 jobs:
   cargo-test-suite:
     runs-on: ubuntu-latest
@@ -44,7 +48,20 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: false
-      
+
+      - name: Set image ref
+        id: image
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "ref=ghcr.io/${REPO}/devcontainer:latest" >> $GITHUB_OUTPUT
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -114,14 +131,21 @@ jobs:
           # Check library dependencies
           ldd tests/external/tools/bsim/bin/bs_2G4_phy_v1 || echo "Warning: library check failed"
 
-      - name: Build devcontainer image (only if needed)
+      - name: Pull or build devcontainer image (for Zephyr setup)
         if: env.NEED_BUILD == 'true'
         run: |
-          docker build \
-            --file .devcontainer/Dockerfile \
-            --platform linux/amd64 \
-            --tag nrf-rpc-dev \
-            .
+          IMAGE="${{ steps.image.outputs.ref }}"
+          if docker pull "$IMAGE" 2>/dev/null; then
+            docker tag "$IMAGE" nrf-rpc-dev
+            echo "✓ Using cached devcontainer image from GHCR"
+          else
+            echo "::notice::No cached image found, building from source"
+            docker build \
+              --file .devcontainer/Dockerfile \
+              --platform linux/amd64 \
+              --tag nrf-rpc-dev \
+              .
+          fi
 
       - name: Fix workspace permissions for container user
         run: sudo chown -R 1000:1000 "$GITHUB_WORKSPACE"
@@ -155,14 +179,21 @@ jobs:
           
           echo "=== Binary check complete ==="
 
-      - name: Build devcontainer image for tests
+      - name: Pull or build devcontainer image (for tests)
         if: env.NEED_BUILD != 'true'
         run: |
-          docker build \
-            --file .devcontainer/Dockerfile \
-            --platform linux/amd64 \
-            --tag nrf-rpc-dev \
-            .
+          IMAGE="${{ steps.image.outputs.ref }}"
+          if docker pull "$IMAGE" 2>/dev/null; then
+            docker tag "$IMAGE" nrf-rpc-dev
+            echo "✓ Using cached devcontainer image from GHCR"
+          else
+            echo "::notice::No cached image found, building from source"
+            docker build \
+              --file .devcontainer/Dockerfile \
+              --platform linux/amd64 \
+              --tag nrf-rpc-dev \
+              .
+          fi
 
       - name: Run cargo test in container
         run: |
