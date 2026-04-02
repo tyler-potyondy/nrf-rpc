@@ -2,13 +2,23 @@
 # Script to setup zephyr submodule and build the server app executable.
 set -e 
 
+# Parse flags
+AUTO_YES=false
+for arg in "$@"; do
+    case $arg in
+        -y|--yes) AUTO_YES=true ;;
+    esac
+done
+
 # Add warning and confirmation before running the script since it will delete the external repo and 
 # reinstall everything from scratch.
-echo "WARNING: zephyr_setup will delete and install a new clean zephyr setup. Please confirm you want to proceed (y/n)"
-read -r response
-if [[ "$response" != "y" ]]; then
-    echo "Aborting zephyr setup."
-    exit 0
+if [ "$AUTO_YES" = false ]; then
+    echo "WARNING: zephyr_setup will delete and install a new clean zephyr setup. Please confirm you want to proceed (y/n)"
+    read -r response
+    if [[ "$response" != "y" ]]; then
+        echo "Aborting zephyr setup."
+        exit 0
+    fi
 fi
 
 
