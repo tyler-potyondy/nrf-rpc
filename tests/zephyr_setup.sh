@@ -2,13 +2,23 @@
 # Script to setup zephyr submodule and build the server app executable.
 set -e 
 
+# Parse flags
+AUTO_YES=false
+for arg in "$@"; do
+    case $arg in
+        -y|--yes) AUTO_YES=true ;;
+    esac
+done
+
 # Add warning and confirmation before running the script since it will delete the external repo and 
 # reinstall everything from scratch.
-echo "WARNING: zephyr_setup will delete and install a new clean zephyr setup. Please confirm you want to proceed (y/n)"
-read -r response
-if [[ "$response" != "y" ]]; then
-    echo "Aborting zephyr setup."
-    exit 0
+if [ "$AUTO_YES" = false ]; then
+    echo "WARNING: zephyr_setup will delete and install a new clean zephyr setup. Please confirm you want to proceed (y/n)"
+    read -r response
+    if [[ "$response" != "y" ]]; then
+        echo "Aborting zephyr setup."
+        exit 0
+    fi
 fi
 
 
@@ -39,9 +49,10 @@ if [ "$(basename "$PWD")" != "tests" ]; then
     exit 1
 fi
 
-# Delete everything except .gitignore
+# Delete everything including .gitignore files (but keep the top-level .gitignore)
 log_info "Cleaning up existing external directory..."
-find external -mindepth 1 -not -name '.gitignore' -delete 2>/dev/null || true
+find external -mindepth 2 -delete 2>/dev/null || true
+find external -mindepth 1 -maxdepth 1 -not -name '.gitignore' -delete 2>/dev/null || true
 
 log_info "Setting up zephyr submodule and building server app executable..."
 git submodule update --init external/nrf
@@ -101,10 +112,11 @@ log_info "Building Zephyr nrf_rpc protocol_serialization server example..."
 ls
 
 
-# confirm we are on branch bsim-test
-current_branch=$(git -C nrf rev-parse --abrev-ref HEAD)
-if [ "$current_branch" != "bsim-test" ]; then
-    git -C nrf checkout bsim-test
+# confirm we are on branch cgm-bsim
+current_branch=$(git -C nrf rev-parse --abbrev-ref HEAD)
+if [ "$current_branch" != "cgm-bsim" ]; then
+    git -C nrf fetch origin cgm-bsim
+    git -C nrf checkout -B cgm-bsim FETCH_HEAD
 fi
 
 
@@ -127,7 +139,5 @@ fi
 cp -r build/zephyr_server_app/server/zephyr/zephyr.exe tools/bsim/bin/zephyr_rpc_server_app
 cp -r build/cgm_peripheral_sample/peripheral_cgms/zephyr/zephyr.exe tools/bsim/bin/cgm_peripheral_sample
 
-# Copy the BabbleSim binaries to external/tools/bsim/bin
-cp -r tools/bsim/bin/bs_2G4_phy_v1 tools/bsim/bin/bs_2G4_phy_v1
-cp -r tools/bsim/bin/bs_device_time_monitor tools/bsim/bin/bs_device_time_monitor
+log_success "Build artifacts copied to tools/bsim/bin/"
 

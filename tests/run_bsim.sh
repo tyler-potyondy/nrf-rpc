@@ -54,6 +54,10 @@ echo ""
 
 # Run in foreground to see all output
 ./zephyr_rpc_server_app -s=${SIM_ID} -d=0 -uart0_pty -uart_pty_pollT=1000 &
+ZEPHYR_PID=$!
 
 rm -f cgm_peripheral_sample.log
 ./cgm_peripheral_sample -s=${SIM_ID} -d=1 > cgm_peripheral_sample.log 2>&1 &
+
+# Wait for the zephyr process to exit (keeps the script alive)
+wait $ZEPHYR_PID
