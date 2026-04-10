@@ -1,0 +1,27 @@
+# This file is the log of running the standard cgm central app (w/o rpc)
+d_00: @00:00:00.000000  *** Using Zephyr OS v4.2.99-ec78104f1569 ***
+d_00: @00:00:00.000000  Starting Central CGMS Client
+d_00: @00:00:00.000000  [00:00:00.000,000] <inf> bt_sdc_hci_driver: SoftDevice Controller build revision: 
+d_00: @00:00:00.000000                                              9b 8f ac c3 1d 42 ae 44  fa cd 1f c3 48 a0 b4 2f |.....B.D ....H../
+d_00: @00:00:00.000000                                              cf 29 ee 3d                                      |.).=             
+d_00: @00:00:00.000818  [00:00:00.000,793] <inf> bt_hci_core: HW Platform: Nordic Semiconductor (0x0002)
+d_00: @00:00:00.000818  [00:00:00.000,793] <inf> bt_hci_core: HW Variant: nRF52x (0x0002)
+d_00: @00:00:00.000818  [00:00:00.000,793] <inf> bt_hci_core: Firmware: Standard Bluetooth controller (0x00) Version 155.44175 Build 2923568579
+d_00: @00:00:00.000818  [00:00:00.000,793] <wrn> bt_id: No static addresses stored in controller
+d_00: @00:00:00.000998  [00:00:00.000,976] <inf> bt_hci_core: HCI transport: SDC
+d_00: @00:00:00.000998  [00:00:00.000,976] <inf> bt_hci_core: Identity: EE:95:2C:FA:90:5E (random)
+d_00: @00:00:00.000998  [00:00:00.000,976] <inf> bt_hci_core: HCI: version 6.2 (0x10) revision 0xf020, manufacturer 0x0059
+d_00: @00:00:00.000998  [00:00:00.000,976] <inf> bt_hci_core: LMP: version 6.2 (0x10) subver 0xf020
+d_00: @00:00:00.000998  Bluetooth initialized
+d_00: @00:00:00.001178  Scanning started successfully
+d_00: @00:00:00.020666  CGMS device found: DA:7F:21:3D:E5:B4 (random) connectable: yes
+d_00: @00:00:00.128719  Connected: DA:7F:21:3D:E5:B4 (random)
+d_00: @00:00:01.130244  Service discovery completed
+d_00: @00:00:01.130244  CGM Measurement handle: 18, CCC handle: 19
+d_00: @00:00:01.130244  CGM Feature handle: 21
+d_00: @00:00:01.130244  CGM Status handle: 23
+d_00: @00:00:01.130244  Subscribed to CGM Measurement notifications
+d_00: @00:00:01.530292  Passkey for DA:7F:21:3D:E5:B4 (random): 994762 (auto-confirming)
+d_00: @00:00:01.980228  Security changed: DA:7F:21:3D:E5:B4 (random) level 4
+d_00: @00:00:02.180268  CGM Feature: Features=0x000000, Type=18, Location=255
+d_00: @00:00:02.280264  CGM Status: Time offset=0 min, Status=0x000000
