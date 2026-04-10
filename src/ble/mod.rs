@@ -686,7 +686,7 @@ impl<T: AsyncTransport> Ble<T> {
 
         let status = self
             .client
-            .send_command_and_get_i32(packet)
+            .send_command_and_get_i32_ack_events_u8(packet, BT_GATT_ITER_CONTINUE)
             .await
             .map_err(|_| BleError::RpcError)?;
 
@@ -774,10 +774,10 @@ impl<T: AsyncTransport> Ble<T> {
             // params pointer (uintptr_t)
             .encode_uint_64(params_ptr)
             .map_err(|_| BleError::InvalidParameter)?
-            // has_notify (bool → uint8)
-            .encode_uint_8(if params.has_notify { 1 } else { 0 })
+            // has_notify (CBOR bool — nrf_rpc_encode_bool)
+            .cbor_bool(params.has_notify)
             .map_err(|_| BleError::InvalidParameter)?
-            // subscribe callback (null = no callback)
+            // subscribe callback (null = no callback — nrf_rpc_encode_callback)
             .cbor_null()
             .map_err(|_| BleError::InvalidParameter)?
             // value_handle
@@ -788,6 +788,9 @@ impl<T: AsyncTransport> Ble<T> {
             .map_err(|_| BleError::InvalidParameter)?
             // value (notification/indication flags)
             .encode_uint_16(params.value)
+            .map_err(|_| BleError::InvalidParameter)?
+            // min_security (bt_security_t, CONFIG_BT_SMP)
+            .encode_uint_8(params.min_security)
             .map_err(|_| BleError::InvalidParameter)?
             // flags (atomic_t, typically 0)
             .encode_uint_16(params.flags)
@@ -808,7 +811,7 @@ impl<T: AsyncTransport> Ble<T> {
 
         let status = self
             .client
-            .send_command_and_get_i32(packet)
+            .send_command_and_get_i32_ack_events_u8(packet, BT_GATT_ITER_CONTINUE)
             .await
             .map_err(|_| BleError::RpcError)?;
 
@@ -849,6 +852,334 @@ impl<T: AsyncTransport> Ble<T> {
             .map_err(|_| BleError::RpcError)?;
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Auth callback registration
+    // ========================================================================
+
+    /// Set the security level for a connection.
+    ///
+    /// Mirrors `bt_conn_set_security(struct bt_conn *conn, bt_security_t sec)`.
+    /// With CONFIG_BT_MAX_CONN=1, the conn encoding is empty; only the security
+    /// level is sent.
+    ///
+    /// Security levels:
+    /// - 0: BT_SECURITY_L0 (no security)
+    /// - 1: BT_SECURITY_L1 (no encryption / no authentication)
+    /// - 2: BT_SECURITY_L2 (encryption / no authentication)
+    /// - 3: BT_SECURITY_L3 (encryption / authentication)
+    /// - 4: BT_SECURITY_L4 (128-bit key / authenticated SC)
+    pub async fn bt_conn_set_security(&mut self, sec: u8) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 16];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+
+        let builder = builder
+            .encode_uint_8(sec)
+            .map_err(|_| BleError::InvalidParameter)?;
+
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtConnSetSecurityRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        // Use send_command_and_get_i32 which routes through ack_event for
+        // proper dispatch: bool ACK for le_param_req (via bool_ack_cmd_id),
+        // void ACK + auto-confirm for passkey_confirm, void for others.
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(status)
+    }
+
+    /// Register authentication callbacks on the remote (server).
+    ///
+    /// Mirrors `bt_conn_auth_cb_register(const struct bt_conn_auth_cb *cb)`.
+    ///
+    /// `flags` is a bitmask of FLAG_*_PRESENT constants indicating which
+    /// auth callbacks are provided. The server then forwards the corresponding
+    /// auth events (passkey display, passkey confirm, etc.) back to this client.
+    ///
+    /// Common flags:
+    /// - FLAG_PASSKEY_DISPLAY_PRESENT  = 0x02
+    /// - FLAG_PASSKEY_CONFIRM_PRESENT  = 0x08
+    /// - FLAG_CANCEL_PRESENT           = 0x20
+    /// - FLAG_PAIRING_CONFIRM_PRESENT  = 0x40
+    pub async fn bt_conn_auth_cb_register_on_remote(
+        &mut self,
+        flags: u16,
+    ) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 16];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+
+        let builder = builder
+            .encode_uint_16(flags)
+            .map_err(|_| BleError::InvalidParameter)?;
+
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtConnAuthCbRegisterOnRemoteRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        // Now that auth callbacks are registered, the server may send
+        // le_param_req events (cmd_id 0x0D) which require a bool ACK.
+        // Tell the RPC client about this so all event ACK paths handle it.
+        self.client
+            .set_bool_ack_cmd_id(BleHostCommandId::BtConnCbLeParamReqCallRpcCmd as u8);
+
+        // If passkey_confirm is registered (flag 0x08), set up auto-confirm so
+        // that when the server sends a passkey_confirm event during GATT operations,
+        // the client automatically void-ACKs AND sends bt_conn_auth_passkey_confirm().
+        if flags & 0x08 != 0 {
+            self.client.set_auto_confirm(
+                BleHostCommandId::BtRpcAuthCbPasskeyConfirmRpcCmd as u8,
+                BleClientCommandId::BtConnAuthPasskeyConfirmRpcCmd as u8,
+            );
+        }
+
+        Ok(status)
+    }
+
+    /// Confirm a passkey for Secure Connections pairing.
+    ///
+    /// Mirrors `bt_conn_auth_passkey_confirm(struct bt_conn *conn)`.
+    /// With CONFIG_BT_MAX_CONN=1, the conn is not encoded.
+    pub async fn bt_conn_auth_passkey_confirm(&mut self) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 8];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtConnAuthPasskeyConfirmRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(status)
+    }
+
+    /// Confirm a pairing request ("Do you want to pair?").
+    ///
+    /// Mirrors `bt_conn_auth_pairing_confirm(struct bt_conn *conn)`.
+    /// With CONFIG_BT_MAX_CONN=1, the conn is not encoded.
+    pub async fn bt_conn_auth_pairing_confirm(&mut self) -> Result<i32, BleError> {
+        let mut cbor_buffer = [0u8; 8];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+        let payload = builder.build().map_err(|_| BleError::InvalidParameter)?;
+
+        let packet = NrfRpcPacket::<packet::Command>::new(
+            SrcContextId::try_from(self.client.context_id()).expect("Invalid source context ID"),
+            DestContextId::try_from(0xFF).expect("Invalid destination context ID"),
+            CommandId::try_from(BleClientCommandId::BtConnAuthPairingConfirmRpcCmd as u8)
+                .expect("Invalid command ID"),
+            SrcGroupId::try_from(self.client.bt_rpc_group_id()).expect("Invalid source group ID"),
+            DstGroupId::try_from(self.client.bt_rpc_group_id())
+                .expect("Invalid destination group ID"),
+            payload,
+        );
+
+        let status = self
+            .client
+            .send_command_and_get_i32(packet)
+            .await
+            .map_err(|_| BleError::RpcError)?;
+
+        Ok(status)
+    }
+
+    /// Wait for a passkey confirm event and automatically confirm it.
+    ///
+    /// After connecting to a peripheral that requires Secure Connections
+    /// pairing, the server will send a `BtRpcAuthCbPasskeyConfirmRpcCmd`
+    /// event with the passkey. This method waits for that event, ACKs it,
+    /// then calls `bt_conn_auth_passkey_confirm` to complete pairing.
+    ///
+    /// Also handles the `pairing_confirm` event that precedes passkey_confirm
+    /// in Numeric Comparison flows, and recognises `security_changed` (err=0)
+    /// as an indication that pairing completed via Just Works.
+    ///
+    /// Expected event sequence for SC Numeric Comparison:
+    ///   1. `BtRpcAuthCbPairingConfirmRpcCmd` → we reply with `bt_conn_auth_pairing_confirm`
+    ///   2. `BtRpcAuthCbPasskeyConfirmRpcCmd` (contains passkey) → we reply with `bt_conn_auth_passkey_confirm`
+    ///   3. `BtConnCbSecurityChangedCallRpcCmd` (level, err=0) → pairing done
+    ///
+    /// Other events (le_param_updated, etc.) are consumed and skipped.
+    pub async fn wait_for_passkey_confirm_and_accept(&mut self) -> Result<u32, BleError> {
+        #[cfg(test)]
+        extern crate std;
+
+        let timeout_retries = 30; // generous — pairing involves several round-trips
+        let mut passkey_value: Option<u32> = None;
+
+        for _i in 0..timeout_retries {
+            let mut event_buf = [0u8; 256];
+            let (cmd_id, payload_len) = match self.client.receive_server_event(&mut event_buf).await
+            {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
+
+            #[cfg(test)]
+            std::println!(
+                "  [pairing] event cmd_id=0x{:02X}, payload_len={}, raw={:02X?}",
+                cmd_id,
+                payload_len,
+                &event_buf[..payload_len],
+            );
+
+            // ---- pairing_confirm ("Do you want to pair?") ----
+            if cmd_id == BleHostCommandId::BtRpcAuthCbPairingConfirmRpcCmd as u8 {
+                #[cfg(test)]
+                std::println!("  [pairing] Got pairing_confirm — accepting.");
+                let result = self.bt_conn_auth_pairing_confirm().await?;
+                #[cfg(test)]
+                std::println!("  [pairing] bt_conn_auth_pairing_confirm returned {}.", result);
+                if result != 0 {
+                    return Err(BleError::RpcError);
+                }
+                continue; // next: passkey_confirm
+            }
+
+            // ---- passkey_confirm (numeric comparison) ----
+            if cmd_id == BleHostCommandId::BtRpcAuthCbPasskeyConfirmRpcCmd as u8 {
+                let payload = &event_buf[..payload_len];
+                let mut d = minicbor::decode::Decoder::new(payload);
+                let passkey = d.u32().unwrap_or(0);
+
+                #[cfg(test)]
+                std::println!("  [pairing] Got passkey_confirm: passkey={} — confirming.", passkey);
+
+                let result = self.bt_conn_auth_passkey_confirm().await?;
+                #[cfg(test)]
+                std::println!("  [pairing] bt_conn_auth_passkey_confirm returned {}.", result);
+                if result != 0 {
+                    return Err(BleError::RpcError);
+                }
+                passkey_value = Some(passkey);
+                // After confirming, wait for security_changed to know pairing succeeded.
+                continue;
+            }
+
+            // ---- security_changed ----
+            if cmd_id == BleHostCommandId::BtConnCbSecurityChangedCallRpcCmd as u8 {
+                let payload = &event_buf[..payload_len];
+                let mut d = minicbor::decode::Decoder::new(payload);
+                let level = d.u8().unwrap_or(0);
+                let err = d.u8().unwrap_or(0xFF);
+
+                #[cfg(test)]
+                std::println!("  [pairing] Got security_changed: level={}, err={}", level, err);
+
+                if err == 0 {
+                    return Ok(passkey_value.unwrap_or(0));
+                }
+                // err != 0 with no passkey yet: pairing attempt failed, keep looping
+                // (the real passkey_confirm may still arrive on a retry)
+                if passkey_value.is_some() {
+                    // We already confirmed passkey but got an error — fatal
+                    return Err(BleError::RpcError);
+                }
+                continue;
+            }
+
+            // ---- any other event: consume and keep looping ----
+            #[cfg(test)]
+            std::println!("  [pairing] Ignoring unrelated event 0x{:02X}", cmd_id);
+        }
+
+        Err(BleError::RpcError)
+    }
+
+    /// Wait until the connection security level reaches at least `target_level`.
+    ///
+    /// Consumes server events (ACKing them properly, including auto-confirm
+    /// for passkey exchange) until a `BtConnCbSecurityChangedCallRpcCmd`
+    /// arrives with `err == 0` and `level >= target_level`.
+    ///
+    /// This is used after `bt_conn_set_security(4)` to wait for the SMP
+    /// Numeric Comparison passkey exchange to complete.
+    pub async fn wait_for_security_level(&mut self, target_level: u8) -> Result<u8, BleError> {
+        #[cfg(test)]
+        extern crate std;
+
+        let timeout_retries = 30;
+        for _i in 0..timeout_retries {
+            let mut event_buf = [0u8; 256];
+            let (cmd_id, payload_len) = match self.client.receive_server_event(&mut event_buf).await
+            {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
+
+            #[cfg(test)]
+            std::println!(
+                "  [wait_for_security] got event cmd_id=0x{:02X} (expect 0x{:02X}), payload_len={}",
+                cmd_id,
+                BleHostCommandId::BtConnCbSecurityChangedCallRpcCmd as u8,
+                payload_len,
+            );
+
+            if cmd_id == BleHostCommandId::BtConnCbSecurityChangedCallRpcCmd as u8 {
+                let payload = &event_buf[..payload_len];
+                let mut d = minicbor::decode::Decoder::new(payload);
+                let level = d.u8().unwrap_or(0);
+                let err = d.u8().unwrap_or(0xFF);
+
+                #[cfg(test)]
+                std::println!(
+                    "  [wait_for_security] security_changed: level={}, err={}",
+                    level, err,
+                );
+
+                if err == 0 && level >= target_level {
+                    return Ok(level);
+                }
+                // err != 0 or level too low — keep waiting (SMP might still be in progress)
+                continue;
+            }
+
+            // Other events consumed and discarded (auto-confirm handles passkey inline)
+            #[cfg(test)]
+            std::println!("  [wait_for_security] consumed non-security event 0x{:02X}", cmd_id);
+        }
+
+        Err(BleError::RpcError)
     }
 
     // ========================================================================
@@ -1013,8 +1344,236 @@ impl<T: AsyncTransport> Ble<T> {
     }
 
     // ========================================================================
+    // GATT Discovery event waiting
+    // ========================================================================
+
+    /// Wait for and decode a single GATT discovery callback event from the server.
+    ///
+    /// The server sends `BtGattDiscoverCallbackRpcCmd` for each discovered
+    /// attribute, and a final one with attr=NULL to signal completion.
+    ///
+    /// This method responds with `BT_GATT_ITER_CONTINUE` so the server keeps
+    /// iterating. Call repeatedly until `GattDiscoverResult::Complete` is returned.
+    pub async fn wait_for_gatt_discover_result(
+        &mut self,
+    ) -> Result<GattDiscoverResult, BleError> {
+        let timeout_retries = 20;
+        for _i in 0..timeout_retries {
+            let mut event_buf = [0u8; 256];
+            let (cmd_id, payload_len) = match self
+                .client
+                .receive_server_event_with_u8_response(
+                    &mut event_buf,
+                    BT_GATT_ITER_CONTINUE,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
+
+            #[cfg(test)]
+            extern crate std;
+            #[cfg(test)]
+            std::println!(
+                "  [wait_for_gatt_discover] got event cmd_id={} (expect {}), payload_len={}",
+                cmd_id,
+                BleHostCommandId::BtGattDiscoverCallbackRpcCmd as u8,
+                payload_len,
+            );
+
+            if cmd_id == BleHostCommandId::BtGattDiscoverCallbackRpcCmd as u8 {
+                let payload = &event_buf[..payload_len];
+                return Self::decode_discover_callback(payload);
+            }
+            // Not the event we need — keep waiting.
+        }
+
+        Err(BleError::RpcError)
+    }
+
+    /// Wait for and decode a GATT notification event from the server.
+    ///
+    /// The server sends `BtGattSubscribeParamsNotifyRpcCmd` each time a
+    /// notification is received from the peripheral.
+    ///
+    /// Responds with `BT_GATT_ITER_CONTINUE` so the server keeps forwarding.
+    pub async fn wait_for_gatt_notification(
+        &mut self,
+    ) -> Result<GattNotificationData, BleError> {
+        let timeout_retries = 20;
+        for _i in 0..timeout_retries {
+            let mut event_buf = [0u8; 256];
+            let (cmd_id, payload_len) = match self
+                .client
+                .receive_server_event_with_u8_response(
+                    &mut event_buf,
+                    BT_GATT_ITER_CONTINUE,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
+
+            #[cfg(test)]
+            extern crate std;
+            #[cfg(test)]
+            std::println!(
+                "  [wait_for_gatt_notification] got event cmd_id={} (expect {}), payload_len={}",
+                cmd_id,
+                BleHostCommandId::BtGattSubscribeParamsNotifyRpcCmd as u8,
+                payload_len,
+            );
+
+            if cmd_id == BleHostCommandId::BtGattSubscribeParamsNotifyRpcCmd as u8 {
+                let payload = &event_buf[..payload_len];
+                return Self::decode_notification(payload);
+            }
+            // Not the event we need — keep waiting.
+        }
+
+        Err(BleError::RpcError)
+    }
+
+    // ========================================================================
     // Internal event decoders
     // ========================================================================
+
+    /// Decode a GATT discovery callback from raw CBOR payload.
+    ///
+    /// Wire format (CONFIG_BT_MAX_CONN=1, so no conn encoded):
+    ///   params_ptr(uint),
+    ///   then either:
+    ///     null            → discovery complete
+    ///     OR:
+    ///       uuid(bstr)    → attribute UUID
+    ///       handle(uint)  → attribute handle
+    ///       user_data:
+    ///         null                                → no user_data
+    ///         OR for primary/secondary service:
+    ///           service_uuid(bstr), end_handle(uint)
+    ///         OR for characteristic:
+    ///           char_uuid(bstr), value_handle(uint), properties(uint)
+    fn decode_discover_callback(payload: &[u8]) -> Result<GattDiscoverResult, BleError> {
+        let mut d = minicbor::decode::Decoder::new(payload);
+
+        // params_ptr — we don't need it currently, but must consume it.
+        let _params_ptr = d.u64().map_err(|_| BleError::RpcError)?;
+
+        // Check for null (discovery complete).
+        // Use datatype() to peek without consuming, because d.null() advances
+        // the decoder position even on failure.
+        if d.datatype().map_err(|_| BleError::RpcError)? == minicbor::data::Type::Null {
+            let _ = d.null();
+            return Ok(GattDiscoverResult::Complete);
+        }
+
+        // attr != NULL: decode uuid, handle, user_data
+        let uuid_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+        let handle = d.u16().map_err(|_| BleError::RpcError)?;
+
+        // Extract the 16-bit UUID value from the attr's uuid bytes.
+        // C struct bt_uuid_16 layout: [type(1), pad(1), val_lo, val_hi]
+        let attr_uuid_16 = if uuid_bytes.len() >= 4 && uuid_bytes[0] == cgm::BT_UUID_TYPE_16 {
+            u16::from_le_bytes([uuid_bytes[2], uuid_bytes[3]])
+        } else {
+            0
+        };
+
+        // Check if user_data is null.
+        // Peek with datatype() to avoid corrupting decoder position.
+        if d.datatype().map_err(|_| BleError::RpcError)? == minicbor::data::Type::Null {
+            let _ = d.null();
+            return Ok(GattDiscoverResult::Descriptor {
+                handle,
+                uuid_16: attr_uuid_16,
+            });
+        }
+
+        // user_data is not null — branch on attr_uuid_16
+        match attr_uuid_16 {
+            BT_UUID_GATT_PRIMARY_VAL | BT_UUID_GATT_SECONDARY_VAL => {
+                // Service: service_uuid(bstr), end_handle(uint)
+                let svc_uuid_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+                let end_handle = d.u16().map_err(|_| BleError::RpcError)?;
+
+                let svc_uuid_16 =
+                    if svc_uuid_bytes.len() >= 4 && svc_uuid_bytes[0] == cgm::BT_UUID_TYPE_16 {
+                        u16::from_le_bytes([svc_uuid_bytes[2], svc_uuid_bytes[3]])
+                    } else {
+                        0
+                    };
+
+                Ok(GattDiscoverResult::Service {
+                    handle,
+                    service_uuid_16: svc_uuid_16,
+                    end_handle,
+                })
+            }
+            BT_UUID_GATT_CHRC_VAL => {
+                // Characteristic: char_uuid(bstr), value_handle(uint), properties(uint)
+                let char_uuid_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+                let value_handle = d.u16().map_err(|_| BleError::RpcError)?;
+                let properties = d.u8().map_err(|_| BleError::RpcError)?;
+
+                let char_uuid_16 =
+                    if char_uuid_bytes.len() >= 4 && char_uuid_bytes[0] == cgm::BT_UUID_TYPE_16 {
+                        u16::from_le_bytes([char_uuid_bytes[2], char_uuid_bytes[3]])
+                    } else {
+                        0
+                    };
+
+                Ok(GattDiscoverResult::Characteristic {
+                    handle,
+                    char_uuid_16,
+                    value_handle,
+                    properties,
+                })
+            }
+            _ => {
+                // Include or unknown — treat as descriptor
+                Ok(GattDiscoverResult::Descriptor {
+                    handle,
+                    uuid_16: attr_uuid_16,
+                })
+            }
+        }
+    }
+
+    /// Decode a GATT notification from raw CBOR payload.
+    ///
+    /// Wire format (CONFIG_BT_MAX_CONN=1, so no conn encoded):
+    ///   scratchpad_size(uint), params_ptr(uint), data(bstr | null)
+    ///
+    /// When data is CBOR null, it means the subscription was terminated
+    /// (e.g., peripheral disconnected or unsubscribed). In that case,
+    /// `data_len` is set to 0.
+    fn decode_notification(payload: &[u8]) -> Result<GattNotificationData, BleError> {
+        let mut d = minicbor::decode::Decoder::new(payload);
+
+        let _scratchpad_size = d.u32().map_err(|_| BleError::RpcError)?;
+        let params_ptr = d.u64().map_err(|_| BleError::RpcError)?;
+
+        let mut data = [0u8; 128];
+        let data_len;
+
+        // data can be CBOR null (subscription ended) or a byte string.
+        if d.datatype().map_err(|_| BleError::RpcError)? == minicbor::data::Type::Null {
+            let _ = d.null();
+            data_len = 0;
+        } else {
+            let data_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+            data_len = core::cmp::min(data_bytes.len(), data.len());
+            data[..data_len].copy_from_slice(&data_bytes[..data_len]);
+        }
+
+        Ok(GattNotificationData {
+            params_ptr,
+            data,
+            data_len,
+        })
+    }
 
     /// Decode a scan result from raw CBOR payload.
     ///
@@ -1143,8 +1702,9 @@ pub enum BtGattDiscoverType {
 
 /// Parameters for GATT discovery.
 pub struct BtGattDiscoverParams {
-    /// UUID to discover. Encoded as raw bytes (Zephyr struct format).
-    pub uuid: [u8; 3], // For 16-bit UUIDs: [type, lo, hi]
+    /// UUID to discover. Encoded as raw bytes (Zephyr C struct format).
+    /// For 16-bit UUIDs: [type, padding(0x00), val_lo, val_hi] — matches `struct bt_uuid_16`.
+    pub uuid: [u8; 4],
     /// Start handle for discovery range.
     pub start_handle: u16,
     /// End handle for discovery range.
@@ -1171,6 +1731,10 @@ pub struct BtGattSubscribeParams {
     pub ccc_handle: u16,
     /// Subscription value: 1 = notifications, 2 = indications.
     pub value: u16,
+    /// Minimum required security level (bt_security_t).
+    /// Only encoded when the server has CONFIG_BT_SMP enabled.
+    /// 0 = BT_SECURITY_L0 (no security), 1 = BT_SECURITY_L1, etc.
+    pub min_security: u8,
     /// Atomic flags (typically 0).
     pub flags: u16,
 }
@@ -1282,6 +1846,68 @@ pub struct ConnectionEvent {
 pub struct DisconnectionEvent {
     /// HCI reason code.
     pub reason: u8,
+}
+
+// ============================================================================
+// GATT Event types
+// ============================================================================
+
+/// BT_GATT_ITER_STOP — returned by the client to stop iteration.
+pub const BT_GATT_ITER_STOP: u8 = 0;
+
+/// BT_GATT_ITER_CONTINUE — returned by the client to continue iteration.
+pub const BT_GATT_ITER_CONTINUE: u8 = 1;
+
+/// Attribute UUID types used to distinguish service vs characteristic in
+/// GATT discovery callbacks.
+const BT_UUID_GATT_PRIMARY_VAL: u16 = 0x2800;
+const BT_UUID_GATT_SECONDARY_VAL: u16 = 0x2801;
+const BT_UUID_GATT_INCLUDE_VAL: u16 = 0x2802;
+const BT_UUID_GATT_CHRC_VAL: u16 = 0x2803;
+
+/// Decoded GATT discovery result from a `BtGattDiscoverCallbackRpcCmd` event.
+#[derive(Debug, Clone)]
+pub enum GattDiscoverResult {
+    /// Discovery complete (attr == NULL from server).
+    Complete,
+    /// Primary or secondary service found.
+    Service {
+        /// Attribute handle.
+        handle: u16,
+        /// Service UUID (raw 16-bit value, or 0 if 128-bit).
+        service_uuid_16: u16,
+        /// End handle of the service group.
+        end_handle: u16,
+    },
+    /// Characteristic declaration found.
+    Characteristic {
+        /// Attribute handle (declaration handle).
+        handle: u16,
+        /// Characteristic UUID (raw 16-bit value, or 0 if 128-bit).
+        char_uuid_16: u16,
+        /// Value handle of the characteristic.
+        value_handle: u16,
+        /// Characteristic properties (read, write, notify, etc.).
+        properties: u8,
+    },
+    /// Descriptor found (e.g., CCC).
+    Descriptor {
+        /// Attribute handle.
+        handle: u16,
+        /// Descriptor UUID (raw 16-bit value).
+        uuid_16: u16,
+    },
+}
+
+/// Decoded GATT notification data from a `BtGattSubscribeParamsNotifyRpcCmd` event.
+#[derive(Debug, Clone)]
+pub struct GattNotificationData {
+    /// The params pointer echoed back from the server (for matching subscriptions).
+    pub params_ptr: u64,
+    /// Raw notification payload bytes.
+    pub data: [u8; 128],
+    /// Number of valid bytes in `data`.
+    pub data_len: usize,
 }
 
 // ============================================================================

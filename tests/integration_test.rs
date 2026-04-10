@@ -13,15 +13,13 @@ use nrf_rpc::ble::cgm::{
 };
 use nrf_rpc::ble::{
     BT_GATT_CCC_NOTIFY, BT_LE_SCAN_TYPE_ACTIVE, BtConnLeCreateParam, BtGattDiscoverParams,
-    BtGattDiscoverType, BtGattReadParams, BtGattSubscribeParams, BtLeConnParam, BtLeScanParam,
+    BtGattDiscoverType, BtGattSubscribeParams, BtLeConnParam, BtLeScanParam, GattDiscoverResult,
     ScanResultData,
 };
 use nrf_rpc::{AsyncTransport, RpcClient, TransportError, ble::Ble, uart_transport::Uart};
-use serial_test::serial;
 use std::collections::HashSet;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::os::unix::thread;
 use std::process::{ChildStderr, ChildStdout};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -125,7 +123,9 @@ impl MockUart {
                         break;
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                // No sleep here — the blocking read() on the socket already
+                // yields to the OS when no data is available. Sleeping would
+                // just waste BSIM simulated time.
             }
         });
 
@@ -191,45 +191,62 @@ impl AsyncTransport for MockUart {
     async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
         use std::time::{Duration, Instant};
 
-        // Poll the RX buffer for a bounded amount of time so our minimal
-        // executor (which expects futures to be immediately ready) does not
-        // get stuck forever if no data arrives.
+        const HDLC_DELIMITER: u8 = 0x7E;
+
+        // Instead of sleeping a fixed coalescing delay (which wastes BSIM
+        // simulated time), we scan the RX buffer for complete HDLC frames.
+        // A complete frame is delimited by two 0x7E bytes. We only deliver
+        // bytes up through the last complete frame's closing delimiter,
+        // keeping any partial trailing frame in the buffer for the next read.
+        //
+        // This eliminates all wall-clock sleeps from the data path, so the
+        // RPC client runs at the same speed as BSIM — no simulated time is
+        // wasted waiting for real-time coalescing delays.
         let timeout = Duration::from_secs(5);
         let start = Instant::now();
 
         loop {
             {
                 let rx = self.rx_buffer.lock().unwrap();
-                if !rx.is_empty() {
-                    // Data has started arriving.  Wait until bytes stop
-                    // flowing so we drain complete HDLC frames rather than
-                    // splitting on a 7E delimiter boundary.
-                    let mut prev_len = rx.len();
-                    drop(rx);
+                if rx.len() >= 2 {
+                    // Scan for complete HDLC frames. We need at least two
+                    // 0x7E bytes: one opening and one closing delimiter.
+                    // Find the last position we can deliver (the closing
+                    // delimiter of the last complete frame).
+                    let mut delimiter_count = 0u32;
+                    let mut last_complete_frame_end: Option<usize> = None;
 
-                    loop {
-                        std::thread::sleep(Duration::from_millis(30));
-                        let rx = self.rx_buffer.lock().unwrap();
-                        let cur_len = rx.len();
-                        if cur_len == prev_len {
-                            break; // no new data arrived → coalesced
+                    for (i, &byte) in rx.iter().enumerate() {
+                        if byte == HDLC_DELIMITER {
+                            delimiter_count += 1;
+                            // Every even-numbered delimiter (2nd, 4th, ...)
+                            // closes a frame. But HDLC frames share
+                            // delimiters: the closing 7E of frame N is the
+                            // opening 7E of frame N+1. So after the first
+                            // delimiter, every subsequent delimiter closes
+                            // a frame.
+                            if delimiter_count >= 2 {
+                                last_complete_frame_end = Some(i);
+                            }
                         }
-                        prev_len = cur_len;
                     }
 
-                    let mut rx = self.rx_buffer.lock().unwrap();
-                    let n = core::cmp::min(buffer.len(), rx.len());
-                    buffer[..n].copy_from_slice(&rx[..n]);
-                    rx.drain(0..n);
+                    if let Some(end_pos) = last_complete_frame_end {
+                        let n = core::cmp::min(buffer.len(), end_pos + 1);
+                        drop(rx);
 
-                    // Useful for debugging socket/UART rx
-                    println!(
-                        "MockUart: Delivering {} bytes from RX buffer to client: {:02X?}",
-                        n,
-                        &buffer[..n]
-                    );
+                        let mut rx = self.rx_buffer.lock().unwrap();
+                        buffer[..n].copy_from_slice(&rx[..n]);
+                        rx.drain(0..n);
 
-                    return Ok(n);
+                        println!(
+                            "MockUart: Delivering {} bytes from RX buffer to client: {:02X?}",
+                            n,
+                            &buffer[..n]
+                        );
+
+                        return Ok(n);
+                    }
                 }
             }
 
@@ -241,8 +258,9 @@ impl AsyncTransport for MockUart {
                 return Ok(0);
             }
 
-            // Sleep briefly before polling again to avoid a busy loop.
-            std::thread::sleep(Duration::from_millis(10));
+            // Yield briefly so the RX thread can fill the buffer.
+            // This is just a scheduling yield, not a coalescing delay.
+            std::thread::yield_now();
         }
     }
 
@@ -646,6 +664,25 @@ fn cgm_ble_init(uart: MockUart) -> Ble<MockUart> {
         result.err()
     );
 
+    // Register auth callbacks so pairing (passkey confirm) events are forwarded.
+    // Match the C central_cgms sample which registers:
+    //   passkey_display + passkey_confirm + cancel
+    // Flags: FLAG_PASSKEY_DISPLAY_PRESENT(0x02) | FLAG_PASSKEY_CONFIRM_PRESENT(0x08)
+    //        | FLAG_CANCEL_PRESENT(0x20)
+    const AUTH_FLAGS: u16 = 0x02 | 0x08 | 0x20;
+    let result = embassy_futures::block_on(ble.bt_conn_auth_cb_register_on_remote(AUTH_FLAGS));
+    assert!(
+        result.is_ok(),
+        "bt_conn_auth_cb_register_on_remote failed: {:?}",
+        result.err()
+    );
+    let status = result.unwrap();
+    assert_eq!(
+        status, 0,
+        "bt_conn_auth_cb_register_on_remote returned error: {}",
+        status
+    );
+
     ble
 }
 
@@ -738,15 +775,12 @@ fn test_cgm_bt_enable_and_scan() {
 }
 
 #[test]
-/// Test CGM GATT discovery request.
+/// Smoke-test CGM GATT discovery: init BLE, start scan, verify the RPC
+/// commands are accepted by the server.
 ///
-/// After enabling BT, registering connection callbacks, and starting a scan,
-/// this test waits for the server to connect to the CGM peripheral (via BSIM),
-/// then initiates GATT service discovery for the CGM Service UUID (0x181F).
-///
-/// Note: Since we don't currently handle async callback events from the server
-/// (scan result → auto-connect → connected callback → discover), this test
-/// takes the simplest approach: just verify the RPC commands are accepted.
+/// Note: This test does **not** establish a BLE connection, so GATT discovery
+/// cannot succeed. The full connect → discover → subscribe → notification
+/// flow is exercised by `test_cgm_full_central_flow`.
 fn test_cgm_gatt_discover() {
     println!("Starting CGM GATT discover test...");
 
@@ -754,7 +788,7 @@ fn test_cgm_gatt_discover() {
 
     let mut ble = cgm_ble_init(uart);
 
-    // Start scanning for CGM peripheral
+    // Start scanning for CGM peripheral — verifies the scan RPC is accepted.
     let scan_params = BtLeScanParam {
         scan_type: BT_LE_SCAN_TYPE_ACTIVE,
         options: 0,
@@ -773,25 +807,11 @@ fn test_cgm_gatt_discover() {
     );
     assert_eq!(result.unwrap(), 0);
 
-    // Wait for connection to be established via BSIM.
-    // The CGM peripheral is advertising and the server should auto-connect
-    // if scan results trigger it. In BSIM, this happens within simulated time.
-    std::thread::sleep(Duration::from_secs(3));
+    // Drop the BLE client before the stdout check so the transport reader
+    // doesn't spin on read-timeouts while we scan server logs.
+    drop(ble);
 
-    // Attempt GATT discovery for the CGM service
-    let discover_params = BtGattDiscoverParams {
-        uuid: encode_uuid_16(BT_UUID_CGMS_VAL),
-        start_handle: 0x0001,
-        end_handle: 0xFFFF,
-        discover_type: BtGattDiscoverType::PrimaryService,
-    };
-
-    let result = embassy_futures::block_on(ble.bt_gatt_discover(&discover_params, 0x1234));
-    println!("bt_gatt_discover result: {:?}", result);
-
-    // Verify BT was initialized (minimal assertion — the discover may fail
-    // if no connection was established, which is expected without full
-    // callback handling)
+    // Verify BT was initialized on the server side.
     processes.search_stdout_for_strings(HashSet::from([
         "bt_hci_core: HW Platform: Nordic Semiconductor",
     ]));
@@ -815,6 +835,45 @@ fn test_cgm_gatt_discover() {
 /// 6. Wait for the "connected" callback event (err == 0)
 /// 7. Verify server-side logs confirm BT init and connection
 fn test_cgm_full_central_flow() {
+    const TEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
+    let test_thread = std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            test_cgm_full_central_flow_inner();
+        }));
+        match result {
+            Ok(()) => {
+                let _ = finished_tx.send(Ok(()));
+            }
+            Err(panic_info) => {
+                let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                let _ = finished_tx.send(Err(msg));
+            }
+        }
+    });
+
+    match finished_rx.recv_timeout(TEST_TIMEOUT) {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => panic!("Test panicked: {}", msg),
+        Err(_) => panic!(
+            "test_cgm_full_central_flow TIMED OUT after {:?}",
+            TEST_TIMEOUT
+        ),
+    }
+
+    // Best-effort join (the thread should have finished by now)
+    let _ = test_thread.join();
+}
+
+fn test_cgm_full_central_flow_inner() {
     println!("=== Starting CGM full central flow test ===");
 
     let (mut processes, uart) = run_zephyr_rpc_server_exe("test_cgm_full_central_flow");
@@ -918,11 +977,7 @@ fn test_cgm_full_central_flow() {
         result.err()
     );
     let status = result.unwrap();
-    assert_eq!(
-        status, 0,
-        "bt_conn_le_create returned error: {}",
-        status
-    );
+    assert_eq!(status, 0, "bt_conn_le_create returned error: {}", status);
     println!("[Step 5] bt_conn_le_create returned 0 (connection initiating).");
 
     // ------------------------------------------------------------------
@@ -936,10 +991,7 @@ fn test_cgm_full_central_flow() {
         conn_event.err()
     );
     let conn_event = conn_event.unwrap();
-    println!(
-        "[Step 6] Connection event received: err={}",
-        conn_event.err
-    );
+    println!("[Step 6] Connection event received: err={}", conn_event.err);
     assert_eq!(
         conn_event.err, 0,
         "Connection failed with HCI error: {}",
@@ -948,9 +1000,327 @@ fn test_cgm_full_central_flow() {
     println!("[Step 6] Connection established successfully!");
 
     // ------------------------------------------------------------------
-    // Step 7: Verify server-side logs
+    // Step 6a: Explicitly set security to level 4 (SC authenticated).
+    //
+    // Unlike the native C central_cgms sample (which relies on
+    // CONFIG_BT_GATT_AUTO_SEC_REQ), the RPC flow needs to explicitly
+    // escalate security before GATT operations. This triggers SMP
+    // Numeric Comparison pairing — the passkey_confirm callback is
+    // handled automatically by the auto-confirm mechanism set up in
+    // bt_conn_auth_cb_register_on_remote.
     // ------------------------------------------------------------------
-    println!("[Step 7] Verifying server-side logs...");
+    println!("[Step 6a] Setting security to level 4 (SC authenticated)...");
+    let result = embassy_futures::block_on(ble.bt_conn_set_security(4));
+    assert!(
+        result.is_ok(),
+        "bt_conn_set_security failed: {:?}",
+        result.err()
+    );
+    let status = result.unwrap();
+    println!("[Step 6a] bt_conn_set_security returned status={}", status);
+
+    // Wait for the SMP exchange to complete (passkey exchange + security level 4)
+    println!("[Step 6a] Waiting for security level 4...");
+    let result = embassy_futures::block_on(ble.wait_for_security_level(4));
+    assert!(
+        result.is_ok(),
+        "Failed to achieve security level 4: {:?}",
+        result.err()
+    );
+    let achieved_level = result.unwrap();
+    println!("[Step 6a] Security level {} achieved!", achieved_level);
+
+    // ------------------------------------------------------------------
+    // Step 7: GATT Service Discovery for CGM Service (UUID 0x181F)
+    // ------------------------------------------------------------------
+    println!("[Step 7] Starting GATT service discovery for CGM Service (0x181F)...");
+
+    let discover_params = BtGattDiscoverParams {
+        uuid: encode_uuid_16(BT_UUID_CGMS_VAL),
+        start_handle: 0x0001,
+        end_handle: 0xFFFF,
+        discover_type: BtGattDiscoverType::PrimaryService,
+    };
+    let discover_params_ptr: u64 = 0xAA01;
+
+    let result =
+        embassy_futures::block_on(ble.bt_gatt_discover(&discover_params, discover_params_ptr));
+    assert!(
+        result.is_ok(),
+        "bt_gatt_discover (primary service) failed: {:?}",
+        result.err()
+    );
+    let status = result.unwrap();
+    assert_eq!(status, 0, "bt_gatt_discover returned error: {}", status);
+    println!("[Step 7] bt_gatt_discover returned 0 — waiting for discovery callbacks...");
+
+    // Collect service discovery results.
+    let mut cgm_service_start_handle: Option<u16> = None;
+    let mut cgm_service_end_handle: Option<u16> = None;
+
+    for i in 0..20 {
+        let result = embassy_futures::block_on(ble.wait_for_gatt_discover_result());
+        match result {
+            Ok(GattDiscoverResult::Service {
+                handle,
+                service_uuid_16,
+                end_handle,
+            }) => {
+                println!(
+                    "  Discover #{}: Service UUID=0x{:04X} handle={} end_handle={}",
+                    i, service_uuid_16, handle, end_handle
+                );
+                if service_uuid_16 == BT_UUID_CGMS_VAL {
+                    println!(
+                        "[Step 7] *** Found CGM Service! handle={} end_handle={} ***",
+                        handle, end_handle
+                    );
+                    cgm_service_start_handle = Some(handle);
+                    cgm_service_end_handle = Some(end_handle);
+                }
+            }
+            Ok(GattDiscoverResult::Complete) => {
+                println!("  Discover #{}: Discovery complete.", i);
+                break;
+            }
+            Ok(other) => {
+                println!("  Discover #{}: {:?}", i, other);
+            }
+            Err(e) => {
+                println!("  Discover #{}: error {:?}", i, e);
+                break;
+            }
+        }
+    }
+
+    let cgm_start = cgm_service_start_handle
+        .expect("CGM Service (0x181F) not found during primary service discovery!");
+    let cgm_end = cgm_service_end_handle.unwrap();
+    println!(
+        "[Step 7] CGM Service discovered: handles {}..{}",
+        cgm_start, cgm_end
+    );
+
+    // ------------------------------------------------------------------
+    // Step 8: Discover CGM Measurement characteristic within the service
+    // ------------------------------------------------------------------
+    println!("[Step 8] Discovering characteristics within CGM Service...");
+
+    let char_discover_params = BtGattDiscoverParams {
+        uuid: encode_uuid_16(BT_UUID_CGM_MEASUREMENT_VAL),
+        start_handle: cgm_start,
+        end_handle: cgm_end,
+        discover_type: BtGattDiscoverType::Characteristic,
+    };
+    let char_params_ptr: u64 = 0xAA02;
+
+    let result =
+        embassy_futures::block_on(ble.bt_gatt_discover(&char_discover_params, char_params_ptr));
+    assert!(
+        result.is_ok(),
+        "bt_gatt_discover (characteristic) failed: {:?}",
+        result.err()
+    );
+    assert_eq!(result.unwrap(), 0);
+
+    let mut cgm_meas_value_handle: Option<u16> = None;
+
+    for i in 0..20 {
+        let result = embassy_futures::block_on(ble.wait_for_gatt_discover_result());
+        match result {
+            Ok(GattDiscoverResult::Characteristic {
+                handle,
+                char_uuid_16,
+                value_handle,
+                properties,
+            }) => {
+                println!(
+                    "  Char #{}: UUID=0x{:04X} handle={} value_handle={} props=0x{:02X}",
+                    i, char_uuid_16, handle, value_handle, properties
+                );
+                if char_uuid_16 == BT_UUID_CGM_MEASUREMENT_VAL {
+                    println!(
+                        "[Step 8] *** Found CGM Measurement Characteristic! value_handle={} ***",
+                        value_handle
+                    );
+                    cgm_meas_value_handle = Some(value_handle);
+                }
+            }
+            Ok(GattDiscoverResult::Complete) => {
+                println!("  Char #{}: Discovery complete.", i);
+                break;
+            }
+            Ok(other) => {
+                println!("  Char #{}: {:?}", i, other);
+            }
+            Err(e) => {
+                println!("  Char #{}: error {:?}", i, e);
+                break;
+            }
+        }
+    }
+
+    let meas_value_handle =
+        cgm_meas_value_handle.expect("CGM Measurement Characteristic (0x2AA7) not found!");
+    println!(
+        "[Step 8] CGM Measurement value_handle={}",
+        meas_value_handle
+    );
+
+    // ------------------------------------------------------------------
+    // Step 9: Discover the CCC descriptor for subscription
+    // ------------------------------------------------------------------
+    println!("[Step 9] Discovering CCC descriptor for CGM Measurement...");
+
+    let ccc_discover_params = BtGattDiscoverParams {
+        uuid: encode_uuid_16(nrf_rpc::ble::cgm::BT_UUID_GATT_CCC_VAL),
+        start_handle: meas_value_handle + 1,
+        end_handle: cgm_end,
+        discover_type: BtGattDiscoverType::Descriptor,
+    };
+    let ccc_params_ptr: u64 = 0xAA03;
+
+    let result =
+        embassy_futures::block_on(ble.bt_gatt_discover(&ccc_discover_params, ccc_params_ptr));
+    assert!(
+        result.is_ok(),
+        "bt_gatt_discover (descriptor) failed: {:?}",
+        result.err()
+    );
+    assert_eq!(result.unwrap(), 0);
+
+    let mut ccc_handle: Option<u16> = None;
+
+    for i in 0..20 {
+        let result = embassy_futures::block_on(ble.wait_for_gatt_discover_result());
+        match result {
+            Ok(GattDiscoverResult::Descriptor { handle, uuid_16 }) => {
+                println!("  Desc #{}: UUID=0x{:04X} handle={}", i, uuid_16, handle);
+                if uuid_16 == nrf_rpc::ble::cgm::BT_UUID_GATT_CCC_VAL && ccc_handle.is_none() {
+                    println!("[Step 9] *** Found CCC descriptor! handle={} ***", handle);
+                    ccc_handle = Some(handle);
+                }
+            }
+            Ok(GattDiscoverResult::Complete) => {
+                println!("  Desc #{}: Discovery complete.", i);
+                break;
+            }
+            Ok(other) => {
+                println!("  Desc #{}: {:?}", i, other);
+            }
+            Err(e) => {
+                println!("  Desc #{}: error {:?}", i, e);
+                break;
+            }
+        }
+    }
+
+    let ccc_handle = ccc_handle.expect("CCC descriptor (0x2902) not found for CGM Measurement!");
+    println!("[Step 9] CCC descriptor handle={}", ccc_handle);
+
+    // ------------------------------------------------------------------
+    // Step 10: Subscribe to CGM Measurement notifications
+    // ------------------------------------------------------------------
+    println!("[Step 10] Subscribing to CGM Measurement notifications...");
+
+    let subscribe_params = BtGattSubscribeParams {
+        has_notify: true,
+        value_handle: meas_value_handle,
+        ccc_handle,
+        value: BT_GATT_CCC_NOTIFY,
+        min_security: 0,
+        flags: 0,
+    };
+    let subscribe_params_ptr: u64 = 0xBB01;
+
+    let result =
+        embassy_futures::block_on(ble.bt_gatt_subscribe(&subscribe_params, subscribe_params_ptr));
+    assert!(
+        result.is_ok(),
+        "bt_gatt_subscribe failed: {:?}",
+        result.err()
+    );
+    let status = result.unwrap();
+    assert_eq!(status, 0, "bt_gatt_subscribe returned error: {}", status);
+    println!("[Step 10] Subscribed to CGM Measurement notifications (status=0).");
+
+    // NOTE: Do NOT dump server stdout here — the SMP pairing passkey exchange
+    // happens asynchronously after subscribe triggers security auto-escalation.
+    // The passkey_confirm event must be ACKed promptly (via auto-confirm) or the
+    // SMP handshake will time out, causing security_changed err=4 (AUTH_FAIL).
+    // The auto-confirm mechanism in ack_event handles passkey_confirm events
+    // automatically when they arrive during wait_for_gatt_notification.
+
+    // ------------------------------------------------------------------
+    // Step 11: Receive and decode at least one CGM measurement notification
+    // ------------------------------------------------------------------
+    println!("[Step 11] Waiting for CGM measurement notification...");
+
+    let mut received_measurement = false;
+    let max_notification_attempts = 30;
+
+    for attempt in 0..max_notification_attempts {
+        let result = embassy_futures::block_on(ble.wait_for_gatt_notification());
+        match result {
+            Ok(notif) => {
+                println!(
+                    "  Notification #{}: params_ptr=0x{:04X} data_len={} raw={:02X?}",
+                    attempt,
+                    notif.params_ptr,
+                    notif.data_len,
+                    &notif.data[..notif.data_len]
+                );
+
+                // data_len == 0 means subscription was torn down (NULL data);
+                // skip and keep waiting for real measurement data.
+                if notif.data_len == 0 {
+                    println!(
+                        "  Notification #{}: NULL data (subscription teardown signal), skipping.",
+                        attempt
+                    );
+                    continue;
+                }
+
+                // Parse the CGM measurement from the notification payload
+                if let Some(measurement) = CgmMeasurement::parse(&notif.data[..notif.data_len]) {
+                    let glucose = measurement.glucose_mg_dl();
+                    println!(
+                        "[Step 11] *** CGM Measurement received! glucose={:.1} mg/dL, \
+                         time_offset={}, flags=0x{:02X} ***",
+                        glucose, measurement.time_offset, measurement.flags
+                    );
+
+                    // Sanity check: glucose should be a reasonable value (1-1000 mg/dL)
+                    assert!(
+                        glucose > 0.0 && glucose < 1000.0,
+                        "Glucose value out of reasonable range: {}",
+                        glucose
+                    );
+
+                    received_measurement = true;
+                    break;
+                } else {
+                    println!(
+                        "  Notification #{}: Could not parse CGM measurement (data too short?)",
+                        attempt
+                    );
+                }
+            }
+            Err(e) => {
+                println!("  Notification #{}: error {:?}, retrying...", attempt, e);
+            }
+        }
+    }
+
+    assert!(
+        received_measurement,
+        "Did not receive any CGM measurement notification from the peripheral!"
+    );
+
+    // ------------------------------------------------------------------
+    // Step 12: Verify server-side logs
+    // ------------------------------------------------------------------
+    println!("[Step 12] Verifying server-side logs...");
     processes.search_stdout_for_strings(HashSet::from([
         "bt_hci_core: HW Platform: Nordic Semiconductor",
     ]));

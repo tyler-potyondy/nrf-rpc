@@ -78,6 +78,19 @@ pub struct RpcClient<T: AsyncTransport> {
     pending_events: [Option<PendingEvent>; MAX_PENDING_EVENTS],
     pending_head: usize,
     pending_count: usize,
+    /// Optional: a server event cmd_id that requires a bool `true` ACK
+    /// instead of the default (void or u8). Set by the BLE module for
+    /// `le_param_req` (0x0D) which expects `nrf_rpc_rsp_decode_bool`.
+    bool_ack_cmd_id: Option<u8>,
+    /// Optional: auto-confirm configuration for SMP passkey_confirm events.
+    /// When set, upon receiving a server event matching `auto_confirm_event_cmd_id`,
+    /// the client will:
+    ///   1. ACK the event with void (normal behavior)
+    ///   2. Immediately send an RPC command (`auto_confirm_action_cmd_id`) to the
+    ///      server to confirm the passkey/pairing, mimicking the C RPC client's
+    ///      inline behavior where the app callback calls bt_conn_auth_passkey_confirm().
+    auto_confirm_event_cmd_id: Option<u8>,
+    auto_confirm_action_cmd_id: Option<u8>,
 }
 
 impl<T: AsyncTransport> RpcClient<T> {
@@ -90,6 +103,9 @@ impl<T: AsyncTransport> RpcClient<T> {
             pending_events: [const { None }; MAX_PENDING_EVENTS],
             pending_head: 0,
             pending_count: 0,
+            bool_ack_cmd_id: None,
+            auto_confirm_event_cmd_id: None,
+            auto_confirm_action_cmd_id: None,
         }
     }
 
@@ -151,6 +167,143 @@ impl<T: AsyncTransport> RpcClient<T> {
 
     pub(crate) fn bt_rpc_group_id(&self) -> u8 {
         self.bt_rpc_group_id
+    }
+
+    /// Set a server event cmd_id that should be ACKed with `bool true`
+    /// instead of the default void/u8 response.
+    ///
+    /// This is called by the BLE module after auth callbacks are registered,
+    /// because `le_param_req` (cmd_id 0x0D) requires a bool response.
+    pub(crate) fn set_bool_ack_cmd_id(&mut self, cmd_id: u8) {
+        self.bool_ack_cmd_id = Some(cmd_id);
+    }
+
+    /// Configure auto-confirm behavior for SMP passkey/pairing events.
+    ///
+    /// When a server event with `event_cmd_id` is received, the client will:
+    ///   1. ACK it normally (void)
+    ///   2. Immediately send an RPC command with `action_cmd_id` (empty CBOR
+    ///      payload, expects i32 response) to the server.
+    ///
+    /// This mimics the C RPC client's behavior where the `passkey_confirm`
+    /// callback calls `bt_conn_auth_passkey_confirm()` inline.
+    pub(crate) fn set_auto_confirm(
+        &mut self,
+        event_cmd_id: u8,
+        action_cmd_id: u8,
+    ) {
+        self.auto_confirm_event_cmd_id = Some(event_cmd_id);
+        self.auto_confirm_action_cmd_id = Some(action_cmd_id);
+    }
+
+    /// Internal helper: ACK a server event with the appropriate response type.
+    ///
+    /// If `override_u8` is Some, use u8 as the default ACK type (for GATT callbacks).
+    /// If the event's cmd_id matches `self.bool_ack_cmd_id`, always use bool true.
+    /// Otherwise, use void.
+    ///
+    /// If the event's cmd_id matches `self.auto_confirm_event_cmd_id`, after
+    /// ACKing, immediately send the confirm command to the server.
+    async fn ack_event(
+        &mut self,
+        cmd_id: u8,
+        src_ctx: u8,
+        dst_grp: u8,
+        src_grp: u8,
+        override_u8: Option<u8>,
+    ) -> Result<(), RpcError> {
+        // Choose ACK type
+        if self.bool_ack_cmd_id == Some(cmd_id) {
+            self.send_bool_response(src_ctx, dst_grp, src_grp, true).await?;
+        } else if let Some(val) = override_u8 {
+            self.send_u8_response(src_ctx, dst_grp, src_grp, val).await?;
+        } else {
+            self.send_void_response(src_ctx, dst_grp, src_grp).await?;
+        }
+
+        // Auto-confirm: if this event is the passkey/pairing confirm event,
+        // immediately send the confirm command to the server.
+        if let (Some(evt_id), Some(action_id)) = (
+            self.auto_confirm_event_cmd_id,
+            self.auto_confirm_action_cmd_id,
+        ) {
+            if cmd_id == evt_id {
+                // Build an empty-payload command for the confirm action
+                let mut cbor_buffer = [0u8; 8];
+                let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+                let payload = builder.build().expect("Failed to build empty CBOR payload");
+
+                let packet = NrfRpcPacket::<crate::packet::Command>::new(
+                    crate::packet::SrcContextId::try_from(self.context_id)
+                        .expect("Invalid source context ID"),
+                    DestContextId::try_from(0xFF).expect("Invalid dest context ID"),
+                    crate::packet::CommandId::try_from(action_id)
+                        .expect("Invalid command ID"),
+                    SrcGroupId::try_from(self.bt_rpc_group_id)
+                        .expect("Invalid source group ID"),
+                    DstGroupId::try_from(self.bt_rpc_group_id)
+                        .expect("Invalid dest group ID"),
+                    payload,
+                );
+
+                // Send the confirm command and get i32 result
+                // We can't call send_command_and_get_i32 recursively, so do a
+                // simple send + receive inline.
+                self.send_packet(packet).await?;
+
+                // Read the i32 response (with retry)
+                for _retry in 0..5 {
+                    let mut buffer = [0u8; 256];
+                    let recv_packet_list = match self.receive_packet(&mut buffer).await {
+                        Ok(list) => list,
+                        Err(_) => continue,
+                    };
+
+                    for recv_packet in recv_packet_list.into_iter().flatten() {
+                        match recv_packet.packet_type {
+                            TypeField::Command => {
+                                // Interleaved event during confirm — ACK it
+                                let evt_cmd_id: u8 = recv_packet.command_id.into();
+                                let evt_src_ctx: u8 = recv_packet.src_context_id.into();
+                                let evt_src_grp: u8 = recv_packet.src_group_id.into();
+                                let evt_dst_grp: u8 = recv_packet.dst_group_id.into();
+                                if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                                    let payload_bytes: &[u8] = payload.into();
+                                    self.enqueue_event(evt_cmd_id, payload_bytes);
+                                }
+                                // ACK appropriately (but don't recurse into auto-confirm)
+                                if self.bool_ack_cmd_id == Some(evt_cmd_id) {
+                                    let _ = self
+                                        .send_bool_response(
+                                            evt_src_ctx,
+                                            evt_dst_grp,
+                                            evt_src_grp,
+                                            true,
+                                        )
+                                        .await;
+                                } else {
+                                    let _ = self
+                                        .send_void_response(
+                                            evt_src_ctx,
+                                            evt_dst_grp,
+                                            evt_src_grp,
+                                        )
+                                        .await;
+                                }
+                            }
+                            TypeField::Response => {
+                                // Got the confirm result — done
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Low-level transport read for observing raw bytes from the server.
@@ -248,6 +401,64 @@ impl<T: AsyncTransport> RpcClient<T> {
         self.send_packet(packet).await
     }
 
+    /// Send a response with a single CBOR uint8 value for a server-initiated Command.
+    ///
+    /// Some server callbacks (e.g., GATT discover, GATT notify) expect the client
+    /// to return a uint8 result (e.g., `BT_GATT_ITER_CONTINUE` or `BT_GATT_ITER_STOP`).
+    pub(crate) async fn send_u8_response(
+        &mut self,
+        dst_context_id: u8,
+        our_group_id: u8,
+        server_group_id: u8,
+        value: u8,
+    ) -> Result<(), RpcError> {
+        let mut cbor_buffer = [0u8; 16];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+        let payload = builder
+            .encode_uint_8(value)
+            .expect("Failed to encode u8 response")
+            .build()
+            .expect("Failed to build u8 CBOR payload");
+
+        let packet = NrfRpcPacket::<crate::packet::Response>::new(
+            DestContextId::try_from(dst_context_id).expect("Invalid dest context ID"),
+            SrcGroupId::try_from(our_group_id).expect("Invalid source group ID"),
+            DstGroupId::try_from(server_group_id).expect("Invalid dest group ID"),
+            payload,
+        );
+
+        self.send_packet(packet).await
+    }
+
+    /// Send a response with a CBOR bool value for a server-initiated Command.
+    ///
+    /// Some server callbacks (e.g., `le_param_req`) expect the client to return
+    /// a boolean value. CBOR true = 0xF5, false = 0xF4.
+    pub(crate) async fn send_bool_response(
+        &mut self,
+        dst_context_id: u8,
+        our_group_id: u8,
+        server_group_id: u8,
+        value: bool,
+    ) -> Result<(), RpcError> {
+        let mut cbor_buffer = [0u8; 16];
+        let builder = CborPayloadBuilder::new(&mut cbor_buffer);
+        let payload = builder
+            .cbor_bool(value)
+            .expect("Failed to encode bool response")
+            .build()
+            .expect("Failed to build bool CBOR payload");
+
+        let packet = NrfRpcPacket::<crate::packet::Response>::new(
+            DestContextId::try_from(dst_context_id).expect("Invalid dest context ID"),
+            SrcGroupId::try_from(our_group_id).expect("Invalid source group ID"),
+            DstGroupId::try_from(server_group_id).expect("Invalid dest group ID"),
+            payload,
+        );
+
+        self.send_packet(packet).await
+    }
+
     /// Send a command packet and expect a void response (no CBOR return value).
     ///
     /// The server sends `nrf_rpc_rsp_send_void` which is a response packet with
@@ -286,7 +497,7 @@ impl<T: AsyncTransport> RpcClient<T> {
                 match recv_packet.packet_type {
                     TypeField::Command => {
                         // Server-initiated event arrived while waiting for our response.
-                        // ACK it with a void response and save for later retrieval.
+                        // ACK it appropriately and save for later retrieval.
                         let cmd_id: u8 = recv_packet.command_id.into();
                         let src_ctx: u8 = recv_packet.src_context_id.into();
                         let src_grp: u8 = recv_packet.src_group_id.into();
@@ -295,7 +506,7 @@ impl<T: AsyncTransport> RpcClient<T> {
                             let payload_bytes: &[u8] = payload.into();
                             self.enqueue_event(cmd_id, payload_bytes);
                         }
-                        let _ = self.send_void_response(src_ctx, dst_grp, src_grp).await;
+                        let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
                     }
                     TypeField::Response => {
                         if let ParsedPayload::Cbor(_) = recv_packet.payload {
@@ -351,7 +562,7 @@ impl<T: AsyncTransport> RpcClient<T> {
                 match recv_packet.packet_type {
                     TypeField::Command => {
                         // Server-initiated event arrived while waiting for our response.
-                        // ACK it with a void response and save for later retrieval.
+                        // ACK it appropriately and save for later retrieval.
                         let cmd_id: u8 = recv_packet.command_id.into();
                         let src_ctx: u8 = recv_packet.src_context_id.into();
                         let src_grp: u8 = recv_packet.src_group_id.into();
@@ -360,14 +571,230 @@ impl<T: AsyncTransport> RpcClient<T> {
                             let payload_bytes: &[u8] = payload.into();
                             self.enqueue_event(cmd_id, payload_bytes);
                         }
-                        let _ = self.send_void_response(src_ctx, dst_grp, src_grp).await;
+                        let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
                     }
                     TypeField::Response => {
                         if response_value.is_none() {
                             if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                                response_value = Some(self
-                                    .decode_i32_response(payload.into())
-                                    .expect("Failed to decode i32 response"));
+                                response_value = Some(
+                                    self.decode_i32_response(payload.into())
+                                        .expect("Failed to decode i32 response"),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(val) = response_value {
+                return Ok(val);
+            }
+        }
+
+        Err(RpcError::NoResponse)
+    }
+
+    /// Like `send_command_and_get_i32`, but ACKs any interleaved server Command
+    /// events with a CBOR uint8 `event_ack_value` instead of a void response.
+    ///
+    /// This is needed when starting GATT discovery or subscribe — the server
+    /// may send callback events interleaved with the i32 result, and those
+    /// callbacks expect a uint8 return code (e.g. BT_GATT_ITER_CONTINUE).
+    pub(crate) async fn send_command_and_get_i32_ack_events_u8(
+        &mut self,
+        packet: NrfRpcPacket<'_, crate::packet::Command>,
+        event_ack_value: u8,
+    ) -> Result<i32, RpcError> {
+        self.send_packet(packet)
+            .await
+            .expect("Failed to send packet");
+
+        let retry_count = 5;
+        for i in 0..retry_count {
+            if i > 0 {
+                self.transport.delay_ms(100).await;
+            }
+
+            let mut buffer = [0u8; 256];
+            let recv_packet_list = match self.receive_packet(&mut buffer).await {
+                Ok(list) => list,
+                Err(_) => continue,
+            };
+
+            let mut response_value: Option<i32> = None;
+
+            for recv_packet in recv_packet_list.into_iter().flatten() {
+                match recv_packet.packet_type {
+                    TypeField::Command => {
+                        let cmd_id: u8 = recv_packet.command_id.into();
+                        let src_ctx: u8 = recv_packet.src_context_id.into();
+                        let src_grp: u8 = recv_packet.src_group_id.into();
+                        let dst_grp: u8 = recv_packet.dst_group_id.into();
+                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                            let payload_bytes: &[u8] = payload.into();
+                            self.enqueue_event(cmd_id, payload_bytes);
+                        }
+                        // ACK with u8 default, but bool for le_param_req
+                        let _ = self
+                            .ack_event(cmd_id, src_ctx, dst_grp, src_grp, Some(event_ack_value))
+                            .await;
+                    }
+                    TypeField::Response => {
+                        if response_value.is_none() {
+                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                                response_value = Some(
+                                    self.decode_i32_response(payload.into())
+                                        .expect("Failed to decode i32 response"),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(val) = response_value {
+                return Ok(val);
+            }
+        }
+
+        Err(RpcError::NoResponse)
+    }
+
+    /// Like `send_command_and_get_i32`, but ACKs any interleaved server Command
+    /// events with a CBOR **bool** response.
+    ///
+    /// This is needed for `bt_conn_set_security` — the server may send a
+    /// `le_param_req` callback event that expects a bool return (true = accept).
+    pub(crate) async fn send_command_and_get_i32_ack_events_bool(
+        &mut self,
+        packet: NrfRpcPacket<'_, crate::packet::Command>,
+        event_ack_value: bool,
+    ) -> Result<i32, RpcError> {
+        self.send_packet(packet)
+            .await
+            .expect("Failed to send packet");
+
+        let retry_count = 5;
+        for i in 0..retry_count {
+            if i > 0 {
+                self.transport.delay_ms(100).await;
+            }
+
+            let mut buffer = [0u8; 256];
+            let recv_packet_list = match self.receive_packet(&mut buffer).await {
+                Ok(list) => list,
+                Err(_) => continue,
+            };
+
+            let mut response_value: Option<i32> = None;
+
+            for recv_packet in recv_packet_list.into_iter().flatten() {
+                match recv_packet.packet_type {
+                    TypeField::Command => {
+                        let cmd_id: u8 = recv_packet.command_id.into();
+                        let src_ctx: u8 = recv_packet.src_context_id.into();
+                        let src_grp: u8 = recv_packet.src_group_id.into();
+                        let dst_grp: u8 = recv_packet.dst_group_id.into();
+                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                            let payload_bytes: &[u8] = payload.into();
+                            self.enqueue_event(cmd_id, payload_bytes);
+                        }
+                        // ACK with the bool value
+                        let _ = self
+                            .send_bool_response(src_ctx, dst_grp, src_grp, event_ack_value)
+                            .await;
+                    }
+                    TypeField::Response => {
+                        if response_value.is_none() {
+                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                                response_value = Some(
+                                    self.decode_i32_response(payload.into())
+                                        .expect("Failed to decode i32 response"),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(val) = response_value {
+                return Ok(val);
+            }
+        }
+
+        Err(RpcError::NoResponse)
+    }
+
+    /// Smart ACK variant of `send_command_and_get_i32`.
+    ///
+    /// Sends a command and decodes an i32 response, while ACKing interleaved
+    /// server events with the correct response type based on their command ID.
+    ///
+    /// - Events matching `bool_ack_cmd_id` are ACKed with `bool true` (e.g., `le_param_req`)
+    /// - Other events are ACKed with `default_ack_u8` (u8 value) if `Some`, or void if `None`
+    ///
+    /// This avoids EBADMSG errors caused by ACKing `le_param_req` (expects bool)
+    /// with the wrong CBOR type (void or u8).
+    pub(crate) async fn send_command_and_get_i32_smart_ack(
+        &mut self,
+        packet: NrfRpcPacket<'_, crate::packet::Command>,
+        default_ack_u8: Option<u8>,
+        bool_ack_cmd_id: Option<u8>,
+    ) -> Result<i32, RpcError> {
+        self.send_packet(packet)
+            .await
+            .expect("Failed to send packet");
+
+        let retry_count = 5;
+        for i in 0..retry_count {
+            if i > 0 {
+                self.transport.delay_ms(100).await;
+            }
+
+            let mut buffer = [0u8; 256];
+            let recv_packet_list = match self.receive_packet(&mut buffer).await {
+                Ok(list) => list,
+                Err(_) => continue,
+            };
+
+            let mut response_value: Option<i32> = None;
+
+            for recv_packet in recv_packet_list.into_iter().flatten() {
+                match recv_packet.packet_type {
+                    TypeField::Command => {
+                        let cmd_id: u8 = recv_packet.command_id.into();
+                        let src_ctx: u8 = recv_packet.src_context_id.into();
+                        let src_grp: u8 = recv_packet.src_group_id.into();
+                        let dst_grp: u8 = recv_packet.dst_group_id.into();
+                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                            let payload_bytes: &[u8] = payload.into();
+                            self.enqueue_event(cmd_id, payload_bytes);
+                        }
+                        // Choose ACK type based on event's cmd_id
+                        if bool_ack_cmd_id == Some(cmd_id) {
+                            let _ = self
+                                .send_bool_response(src_ctx, dst_grp, src_grp, true)
+                                .await;
+                        } else if let Some(u8_val) = default_ack_u8 {
+                            let _ = self
+                                .send_u8_response(src_ctx, dst_grp, src_grp, u8_val)
+                                .await;
+                        } else {
+                            let _ = self
+                                .send_void_response(src_ctx, dst_grp, src_grp)
+                                .await;
+                        }
+                    }
+                    TypeField::Response => {
+                        if response_value.is_none() {
+                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                                response_value = Some(
+                                    self.decode_i32_response(payload.into())
+                                        .expect("Failed to decode i32 response"),
+                                );
                             }
                         }
                     }
@@ -468,8 +895,65 @@ impl<T: AsyncTransport> RpcClient<T> {
                         self.enqueue_event(cmd_id, payload_bytes);
                     }
 
-                    // ACK the event with a void response
-                    let _ = self.send_void_response(src_ctx, dst_grp, src_grp).await;
+                    // ACK the event appropriately (bool for le_param_req, void otherwise)
+                    let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
+                }
+            }
+        }
+
+        found.ok_or(RpcError::NoResponse)
+    }
+
+    /// Receive a server-initiated event and respond with a uint8 value.
+    ///
+    /// Like `receive_server_event`, but sends the given `response_value` as a
+    /// CBOR uint8 in the response packet instead of an empty (void) payload.
+    /// This is needed for GATT callbacks that expect a return code
+    /// (e.g., `BT_GATT_ITER_CONTINUE` or `BT_GATT_ITER_STOP`).
+    pub(crate) async fn receive_server_event_with_u8_response(
+        &mut self,
+        event_payload_out: &mut [u8],
+        response_value: u8,
+    ) -> Result<(u8, usize), RpcError> {
+        // Check the pending-event queue first.
+        // Note: queued events were already ACKed with void when they were first received.
+        // This is a known limitation — only live events get the u8 response.
+        if let Some((cmd_id, payload_buf, payload_len)) = self.dequeue_event() {
+            let len = core::cmp::min(payload_len, event_payload_out.len());
+            event_payload_out[..len].copy_from_slice(&payload_buf[..len]);
+            return Ok((cmd_id, len));
+        }
+
+        // Nothing queued — do a live transport read.
+        let mut buffer = [0u8; 256];
+        let recv_packet_list = self.receive_packet(&mut buffer).await?;
+
+        let mut found: Option<(u8, usize)> = None;
+
+        for recv_packet in recv_packet_list.into_iter().flatten() {
+            if recv_packet.packet_type == TypeField::Command {
+                let cmd_id: u8 = recv_packet.command_id.into();
+                let src_ctx: u8 = recv_packet.src_context_id.into();
+                let src_grp: u8 = recv_packet.src_group_id.into();
+                let dst_grp: u8 = recv_packet.dst_group_id.into();
+
+                if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                    let payload_bytes: &[u8] = payload.into();
+
+                    if found.is_none() {
+                        // First Command — return it directly.
+                        let len = core::cmp::min(payload_bytes.len(), event_payload_out.len());
+                        event_payload_out[..len].copy_from_slice(&payload_bytes[..len]);
+                        found = Some((cmd_id, len));
+                        // Respond with u8 unless this is a bool-ack event
+                        let _ = self
+                            .ack_event(cmd_id, src_ctx, dst_grp, src_grp, Some(response_value))
+                            .await;
+                    } else {
+                        // Additional Command — enqueue for later, ACK appropriately
+                        self.enqueue_event(cmd_id, payload_bytes);
+                        let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
+                    }
                 }
             }
         }

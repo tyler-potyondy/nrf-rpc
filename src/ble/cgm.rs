@@ -18,8 +18,8 @@ pub const BT_UUID_CGM_STATUS_VAL: u16 = 0x2AA9;
 /// GATT Client Characteristic Configuration Descriptor UUID (0x2902)
 pub const BT_UUID_GATT_CCC_VAL: u16 = 0x2902;
 
-/// BT_UUID_TYPE_16 from Zephyr
-pub const BT_UUID_TYPE_16: u8 = 0x01;
+/// BT_UUID_TYPE_16 from Zephyr (enum value 0)
+pub const BT_UUID_TYPE_16: u8 = 0x00;
 
 /// Encode a 16-bit UUID into the Zephyr `struct bt_uuid_16` wire format.
 ///
@@ -31,10 +31,11 @@ pub const BT_UUID_TYPE_16: u8 = 0x01;
 /// };
 /// ```
 ///
-/// Returns a 3-byte array: `[type, val_lo, val_hi]`.
-pub fn encode_uuid_16(uuid_val: u16) -> [u8; 3] {
+/// Returns a 4-byte array matching the C `struct bt_uuid_16` layout:
+/// `[type, padding(0x00), val_lo, val_hi]`.
+pub fn encode_uuid_16(uuid_val: u16) -> [u8; 4] {
     let le = uuid_val.to_le_bytes();
-    [BT_UUID_TYPE_16, le[0], le[1]]
+    [BT_UUID_TYPE_16, 0x00, le[0], le[1]]
 }
 
 /// SFLOAT (Short Float) from IEEE 11073-20601.
