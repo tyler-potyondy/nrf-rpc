@@ -149,19 +149,6 @@ impl<'a> UartRxTransport<'a> {
         Self {
             inner: UartTransportBuffer::<'_, UncheckedEncoded>::new(buffer),
         }
-
-        if !found_start {
-            // No delimiter byte found, return error with original buffer.
-            return Err((buffer, ()));
-        }
-
-        // Split buffer into two slices: the packet (start_ind..=closing_ind) and the remaining data after.
-        let (packet_and_before, remaining_buffer) = buffer.split_at_mut(closing_ind + 1);
-        let processing_buffer: &mut [u8] = &mut packet_and_before[start_ind..];
-
-        let transport_buf = UartRxTransport::new(processing_buffer);
-
-        Ok((transport_buf, Some(remaining_buffer)))
     }
 
     fn decode(self) -> Result<UartTransportBuffer<'a, Decoded>, ()> {

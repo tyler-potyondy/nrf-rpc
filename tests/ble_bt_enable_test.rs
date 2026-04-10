@@ -114,9 +114,24 @@ fn test_bt_enable_uses_enable_command_and_parses_status() {
     // 00: dst group id
     // 00: CBOR 0 (success status)
 
-    // Calculate CRC16-CCITT for the raw packet
+    // Calculate CRC16-CCITT for the raw packet (seed=0xFFFF, poly=0x8408)
+    fn crc16_ccitt_slice(data: &[u8]) -> u16 {
+        let mut crc: u16 = 0xffff;
+        for &byte in data {
+            let mut b = byte;
+            for _ in 0..8 {
+                if (crc ^ b as u16) & 0x0001 != 0 {
+                    crc = (crc >> 1) ^ 0x8408;
+                } else {
+                    crc >>= 1;
+                }
+                b >>= 1;
+            }
+        }
+        crc
+    }
     let raw_packet = vec![0x01, 0xFF, 0x00, 0x00, 0x00, 0x00];
-    let crc = calculate_crc16_ccitt(&raw_packet);
+    let crc = crc16_ccitt_slice(&raw_packet);
 
     // UART framing: 0x7e (delimiter) + raw_packet + crc (2 bytes, LE) + 0x7e (delimiter)
     let mut response = vec![0x7e]; // opening delimiter
