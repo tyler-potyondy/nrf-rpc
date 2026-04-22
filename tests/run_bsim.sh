@@ -3,6 +3,12 @@
 
 #set -e
 
+# Confirm this script is running on a linux (babblesim only supports linux)
+if [[ "$(uname)" != "Linux" ]]; then
+    echo "Error: This script must be run on a Linux system."
+    exit 1
+fi
+
 # Confirm currently in directory tests/external
 if [ "$(basename "$PWD")" != "tests" ]; then
     echo "Error: This script must be run from the tests directory."

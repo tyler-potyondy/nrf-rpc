@@ -432,8 +432,7 @@ fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockUart) {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let mut rpc_server = Command::new("setsid")
-        .arg("sh")
+    let mut rpc_server = Command::new("bash")
         .current_dir(TEST_DIRECTORY_PATH) // Set working directory
         .arg(ZEPHY_RPC_SERVER_RUN_SCRIPT)
         .arg(test_name)
@@ -524,7 +523,7 @@ fn create_socat_socket(pty_port: &str, socket_path: &str) -> std::process::Child
         // The PTY path we get from the server log (e.g. /dev/pts/4) is an
         // already-existing device, so we use FILE: instead of creating a new
         // PTY with link=.
-        .arg(format!("UNIX-LISTEN:{},fork", socket_path))
+        .arg(format!("UNIX-LISTEN:{}", socket_path))
         .arg(format!("FILE:{},raw,echo=0", pty_port))
         .spawn()
         .expect("Failed to start socat")
