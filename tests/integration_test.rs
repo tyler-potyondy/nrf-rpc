@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 /// Mock error type
@@ -283,11 +283,72 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
 }
 
 const TEST_DIRECTORY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
+const BSIM_BIN_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/external/tools/bsim/bin");
+
+/// One-shot environment precondition check. Runs the first time any test
+/// invokes `run_zephyr_rpc_server_exe`; subsequent calls are a no-op thanks to
+/// [`Once`]. Panics with an actionable error if BabbleSim isn't set up or a
+/// required system tool is missing — this prevents every test in the suite
+/// from failing with opaque spawn errors later.
+fn preflight_check() {
+    static PREFLIGHT: Once = Once::new();
+    PREFLIGHT.call_once(|| {
+        if !cfg!(target_os = "linux") {
+            panic!(
+                "BabbleSim integration tests require Linux (current target: {}). \
+                 Rerun on either a linux machine or in container \
+                 (`cargo xtask docker-build && cargo xtask docker-attach`).",
+                std::env::consts::OS,
+            );
+        }
+
+        let bsim_bin = Path::new(BSIM_BIN_PATH);
+        for (label, bin) in [
+            ("BabbleSim PHY simulator", "bs_2G4_phy_v1"),
+            ("Zephyr RPC server app", "zephyr_rpc_server_app"),
+            ("CGM peripheral sample", "cgm_peripheral_sample"),
+        ] {
+            let path = bsim_bin.join(bin);
+            if !path.exists() {
+                panic!(
+                    "{label} binary missing at {}. \
+                     Run `cargo xtask zephyr-setup --prebuilt` (or `--build-from-source`) \
+                     inside the dev container to provision BabbleSim.",
+                    path.display(),
+                );
+            }
+        }
+
+        let socat_ok = std::process::Command::new("socat")
+            .arg("-V")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !socat_ok {
+            panic!(
+                "`socat` is required by the test harness but was not found on PATH. \
+                 Install it (`apt-get install socat`) or run inside the dev container \
+                 where it's pre-installed.",
+            );
+        }
+
+        println!(
+            "Preflight OK: OS=linux, BabbleSim binaries present in {}, socat available.",
+            bsim_bin.display(),
+        );
+    });
+}
 
 /// Spawn the full BabbleSim stack (PHY + Zephyr RPC server + CGM peripheral + socat bridge)
 /// via `nrf-sim-bridge`, and return the managed [`TestProcesses`] handle plus a
 /// [`MockUart`] connected to the socat-backed UNIX socket.
+///
+/// Automatically runs [`preflight_check`] on first use so tests fail fast with
+/// an actionable error if the sim environment isn't set up.
 fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockUart) {
+    preflight_check();
     let tests_dir = Path::new(TEST_DIRECTORY_PATH);
     let (processes, socket_path) = spawn_zephyr_rpc_server_with_socat(tests_dir, test_name);
     let socket_path_str = socket_path
@@ -298,6 +359,10 @@ fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockUart) {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Basic functionality test to launch server. No client interactions for this test.
 fn test_zephyr_rpc_server() {
     println!("Starting Zephyr RPC server test to test that the server launches properly.");
@@ -310,6 +375,10 @@ fn test_zephyr_rpc_server() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Test the client can send a packet and receive an ACK.
 fn test_client_can_send_packet() {
     println!("Starting client can send packet test...");
@@ -333,6 +402,10 @@ fn test_client_can_send_packet() {
 // }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 fn test_client_group_handshake() {
     println!("Starting client group handshake test...");
 
@@ -345,6 +418,10 @@ fn test_client_group_handshake() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 fn test_bt_enable_initializes_bluetooth() {
     println!("Starting bt_enable integration test...");
 
@@ -365,6 +442,10 @@ fn test_bt_enable_initializes_bluetooth() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 fn test_bt_begin_advertising() {
     println!("Starting bt_begin_advertising integration test...");
 
@@ -454,6 +535,10 @@ fn cgm_ble_init(uart: MockUart) -> Ble<MockUart> {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Test that BLE scanning can be started and stopped successfully.
 ///
 /// This verifies that the bt_le_scan_start RPC command is correctly encoded
@@ -507,6 +592,10 @@ fn test_cgm_scan_start_stop() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Test that bt_enable + scan start works and the server initializes properly.
 ///
 /// This is a simpler smoke test for the CGM central flow — just enabling BT
@@ -542,6 +631,10 @@ fn test_cgm_bt_enable_and_scan() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Smoke-test CGM GATT discovery: init BLE, start scan, verify the RPC
 /// commands are accepted by the server.
 ///
@@ -589,6 +682,10 @@ fn test_cgm_gatt_discover() {
 // =============================================================================
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Full CGM Central flow: discover → connect → verify.
 ///
 /// This test exercises the complete BLE central pipeline against the CGM
