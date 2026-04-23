@@ -1,23 +1,5 @@
 //! Simple C function signature parser for RPC code generation.
 
-/// Check if a string is a valid C identifier
-fn is_valid_identifier(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    
-    let mut chars = s.chars();
-    let first = chars.next().unwrap();
-    
-    // First character must be letter or underscore
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    
-    // Rest can be letters, digits, or underscores
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CFunctionInfo {
@@ -148,33 +130,35 @@ fn parse_parameters_from_string(params_str: &str) -> Result<Vec<CParameter>, Str
             return Err(format!("Empty parameter at position {}", idx));
         }
 
-        // For simple case like "type_name param_name", last token is param name
-        // Everything before is the type
-        if tokens.len() >= 2 {
-            let mut name = tokens.last().unwrap().to_string();
-            let mut type_tokens = tokens[..tokens.len() - 1].to_vec();
-            
-            // Handle pointer/asterisk attached to parameter name: "type *name"
-            if name.starts_with('*') {
-                // Move the * from the name to the type
-                type_tokens.push("*");
-                name = name[1..].to_string();
+        let mut name = String::new();
+        let mut type_parts = Vec::new();
+
+        // The last token (with leading '*' stripped) is the parameter name.
+        // Everything else (plus any stripped stars) forms the type.
+        if let Some(last) = tokens.last() {
+            let stars: String = last.chars().take_while(|&c| c == '*').collect();
+            let base_name = last.trim_start_matches('*');
+
+            if !base_name.is_empty() {
+                name = base_name.to_string();
+                for t in &tokens[..tokens.len() - 1] {
+                    type_parts.push(t.to_string());
+                }
+                if !stars.is_empty() {
+                    type_parts.push(stars);
+                }
             }
-            
-            if !is_valid_identifier(&name) {
-                return Err(format!("`{:?}` is not a valid identifier", name));
-            }
-            
-            let type_str = type_tokens.join(" ");
-            let c_type = parse_c_type(&type_str)?;
-            parameters.push(CParameter { name, c_type });
-        } else {
-            // Single token - assume it's a type with anonymous parameter
-            let name = format!("param{}", idx);
-            let type_str = tokens[0];
-            let c_type = parse_c_type(type_str)?;
-            parameters.push(CParameter { name, c_type });
         }
+
+        if name.is_empty() || type_parts.is_empty() {
+            name = format!("param{}", idx);
+            type_parts = tokens.iter().map(|s| s.to_string()).collect();
+        }
+
+        let type_str = type_parts.join(" ");
+        let c_type = parse_c_type(&type_str)?;
+
+        parameters.push(CParameter { name, c_type });
     }
 
     Ok(parameters)

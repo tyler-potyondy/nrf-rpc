@@ -54,8 +54,14 @@ impl<'a> TryFrom<&'a mut [u8]> for ParsedNrfRpcPacket<'a> {
             return Err(()); // Buffer too small to contain header
         }
 
-        let (packet_type, src_context_id): (TypeField, SrcContextId) =
-            (value[0].try_into()?, value[0].try_into()?);
+        let packet_type: TypeField = value[0].try_into()?;
+        // For Command packets, byte 0 = 0x80 | src_context_id.
+        // Strip the type bit to get the actual context ID.
+        let src_context_id: SrcContextId = if packet_type == TypeField::Command {
+            SrcContextId::try_from(value[0] & 0x7F)?
+        } else {
+            SrcContextId::try_from(0)?
+        };
 
         let command_id: CommandId = value[1].try_into()?;
         let dst_context_id: DestContextId = value[2].try_into()?;

@@ -103,23 +103,6 @@ fn block_on<F: core::future::Future>(mut f: F) -> F::Output {
     }
 }
 
-/// CRC16-CCITT calculation matching the UART transport implementation.
-/// Polynomial 0x8408, seed 0xffff, reflected input/output.
-fn calculate_crc16_ccitt(data: &[u8]) -> u16 {
-    let mut crc = 0xffffu16;
-    for &byte in data {
-        crc ^= byte as u16;
-        for _ in 0..8 {
-            if (crc & 1) != 0 {
-                crc = (crc >> 1) ^ 0x8408u16;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    crc
-}
-
 #[test]
 fn test_bt_enable_uses_enable_command_and_parses_status() {
     // Minimal nRF RPC response frame for bt_enable:
@@ -131,9 +114,24 @@ fn test_bt_enable_uses_enable_command_and_parses_status() {
     // 00: dst group id
     // 00: CBOR 0 (success status)
 
-    // Calculate CRC16-CCITT for the raw packet
+    // Calculate CRC16-CCITT for the raw packet (seed=0xFFFF, poly=0x8408)
+    fn crc16_ccitt_slice(data: &[u8]) -> u16 {
+        let mut crc: u16 = 0xffff;
+        for &byte in data {
+            let mut b = byte;
+            for _ in 0..8 {
+                if (crc ^ b as u16) & 0x0001 != 0 {
+                    crc = (crc >> 1) ^ 0x8408;
+                } else {
+                    crc >>= 1;
+                }
+                b >>= 1;
+            }
+        }
+        crc
+    }
     let raw_packet = vec![0x01, 0xFF, 0x00, 0x00, 0x00, 0x00];
-    let crc = calculate_crc16_ccitt(&raw_packet);
+    let crc = crc16_ccitt_slice(&raw_packet);
 
     // UART framing: 0x7e (delimiter) + raw_packet + crc (2 bytes, LE) + 0x7e (delimiter)
     let mut response = vec![0x7e]; // opening delimiter

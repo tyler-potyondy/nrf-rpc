@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
+use syn::Macro;
 use syn::{parenthesized, punctuated::Punctuated, DeriveInput, LitStr, Token};
 
 mod c_parser;
@@ -288,7 +289,7 @@ impl RpcFromCArgs {
                         .map_err(|_| nrf_rpc::RpcError::Transport)?,
                     nrf_rpc::packet::DestContextId::try_from(0xFF)
                         .map_err(|_| nrf_rpc::RpcError::Transport)?,
-                    nrf_rpc::packet::CommandId::try_from(BleClientCommandId::#command_id_ident as u8)
+                    nrf_rpc::packet::CommandId::try_from(nrf_rpc::ble::BleClientCommandId::#command_id_ident as u8)
                         .map_err(|_| nrf_rpc::RpcError::Transport)?,
                     nrf_rpc::packet::SrcGroupId::try_from(self.#client_arg_name.bt_rpc_group_id())
                         .map_err(|_| nrf_rpc::RpcError::Transport)?,

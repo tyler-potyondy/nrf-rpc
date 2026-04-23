@@ -1,0 +1,27 @@
+# This file is the log of running the standard cgm periperal app (w/o rpc)
+
+d_01: @00:00:00.000000  *** Booting nRF Connect SDK v3.2.1-bc7ad6beb93b ***
+d_01: @00:00:00.000000  *** Using Zephyr OS v4.2.99-ec78104f1569 ***
+d_01: @00:00:00.000000  Starting Bluetooth Peripheral CGM sample
+d_01: @00:00:00.001530  [00:00:00.001,525] <inf> fs_nvs: 8 Sectors of 4096 bytes
+d_01: @00:00:00.001530  [00:00:00.001,525] <inf> fs_nvs: alloc wra: 0, fe8
+d_01: @00:00:00.001530  [00:00:00.001,525] <inf> fs_nvs: data wra: 0, 0
+d_01: @00:00:00.001530  [00:00:00.001,525] <inf> bt_sdc_hci_driver: SoftDevice Controller build revision: 
+d_01: @00:00:00.001530                                              9b 8f ac c3 1d 42 ae 44  fa cd 1f c3 48 a0 b4 2f |.....B.D ....H../
+d_01: @00:00:00.001530                                              cf 29 ee 3d                                      |.).=             
+d_01: @00:00:00.002048  [00:00:00.002,044] <inf> bt_hci_core: HW Platform: Nordic Semiconductor (0x0002)
+d_01: @00:00:00.002048  [00:00:00.002,044] <inf> bt_hci_core: HW Variant: nRF52x (0x0002)
+d_01: @00:00:00.002048  [00:00:00.002,044] <inf> bt_hci_core: Firmware: Standard Bluetooth controller (0x00) Version 155.44175 Build 2923568579
+d_01: @00:00:00.002048  [00:00:00.002,044] <inf> bt_hci_core: No ID address. App must call settings_load()
+d_01: @00:00:00.002048  Bluetooth initialized
+d_01: @00:00:00.002048  [00:00:00.002,044] <wrn> bt_id: No static addresses stored in controller
+d_01: @00:00:00.002228  [00:00:00.002,227] <inf> bt_hci_core: HCI transport: SDC
+d_01: @00:00:00.002228  [00:00:00.002,227] <inf> bt_hci_core: Identity: DA:7F:21:3D:E5:B4 (random)
+d_01: @00:00:00.002228  [00:00:00.002,227] <inf> bt_hci_core: HCI: version 6.2 (0x10) revision 0xf020, manufacturer 0x0059
+d_01: @00:00:00.002228  [00:00:00.002,227] <inf> bt_hci_core: LMP: version 6.2 (0x10) subver 0xf020
+d_01: @00:00:00.012791  Session starts.
+d_01: @00:00:00.012791  Advertising successfully started
+d_01: @00:00:00.128722  Connected EE:95:2C:FA:90:5E (random)
+d_01: @00:00:01.480098  Passkey for EE:95:2C:FA:90:5E (random): 994762 (auto-confirming)
+d_01: @00:00:01.991368  Security changed: EE:95:2C:FA:90:5E (random) level 4
+d_01: @00:00:02.030066  [00:00:02.030,059] <inf> cgms: CGMS Measurement: notification enabled

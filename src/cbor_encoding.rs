@@ -280,6 +280,14 @@ impl<'a> CborPayloadBuilder<'a> {
         Ok(self)
     }
 
+    pub fn cbor_bool(mut self, value: bool) -> Result<Self, CborError> {
+        self.encode(|encoder| {
+            encoder.bool(value)?;
+            Ok(())
+        })?;
+        Ok(self)
+    }
+
     pub fn cbor_null(mut self) -> Result<Self, CborError> {
         self.encode(|encoder| {
             encoder.null()?;

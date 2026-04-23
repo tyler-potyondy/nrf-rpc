@@ -155,6 +155,7 @@ pub struct NrfRpcPacket<'a, T: NrfRpcPacketType<'a>> {
     associated_packet_type: PhantomData<T>,
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct DestContextId(u8);
 
 impl TryFrom<u8> for DestContextId {
@@ -170,6 +171,7 @@ impl Into<u8> for DestContextId {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct SrcGroupId(u8);
 
 impl TryFrom<u8> for SrcGroupId {
@@ -201,6 +203,7 @@ impl Into<u8> for DstGroupId {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct CommandId(u8);
 
 impl TryFrom<u8> for CommandId {
@@ -216,6 +219,7 @@ impl Into<u8> for CommandId {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct SrcContextId(u8);
 const COMMAND_ID_FIELD_UNUSED: CommandId = CommandId(0x0);
 
@@ -483,6 +487,7 @@ pub trait NrfRpcPacketType<'a> {
     const PACKET_TYPE: TypeField;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeField {
     Event = 0x00,
     Response = 0x01,
@@ -495,13 +500,18 @@ pub enum TypeField {
 impl TryFrom<u8> for TypeField {
     type Error = ();
     fn try_from(value: u8) -> Result<Self, Self::Error> {
+        // Command packets have bit 7 set: 0x80 | source_context_id.
+        // The lower 7 bits carry the source context ID, so any value
+        // >= 0x80 is a Command.
+        if value & COMMAND_PACKET_TYPE_BASE != 0 {
+            return Ok(TypeField::Command);
+        }
         match value {
             EVENT_PACKET_TYPE => Ok(TypeField::Event),
             RESPONSE_PACKET_TYPE => Ok(TypeField::Response),
             EVENT_ACK_PACKET_TYPE => Ok(TypeField::EventAck),
             ERROR_REPORT_PACKET_TYPE => Ok(TypeField::ErrorReport),
             INIT_PACKET_TYPE => Ok(TypeField::Init),
-            COMMAND_PACKET_TYPE_BASE => Ok(TypeField::Command),
             _ => Err(()),
         }
     }
