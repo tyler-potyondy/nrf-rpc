@@ -204,7 +204,7 @@ dependencies = [
 [[package]]
 name = "nrf-sim-bridge"
 version = "0.1.0"
-source = "git+https://github.com/tyler-potyondy/nrf-sim-bridge#3db8e77e4039b808726d302eabab916e3d9f8f43"
+source = "git+https://github.com/tyler-potyondy/nrf-sim-bridge#9fde9c0c61f0849af2168f12dbc5277a056f2590"
 
 [[package]]
 name = "once_cell"
