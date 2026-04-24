@@ -1,4 +1,15 @@
-name: Devcontainer cargo test
+name: cargo test
+
+# Two test paths exercise the integration suite:
+#
+#   - test-prebuilt: bare-metal Linux runner, prebuilt BabbleSim binaries
+#     pulled from the nrf-sim-bridge GitHub Releases. Fast, runs on every
+#     push, every PR, and nightly.
+#
+#   - test-source-build: full Zephyr/BabbleSim build from source inside the
+#     dev container (`cargo xtask docker-build` -> `cargo xtask zephyr-setup
+#     --build-from-source`). Slow but validates the Dockerfile and the
+#     Zephyr toolchain end-to-end. Nightly only.
 
 on:
   push:
@@ -7,220 +18,111 @@ on:
       - master
   pull_request:
   schedule:
-    # Nightly test with precompiled binaries (fast validation)
-    - cron: '0 2 * * *'  # 2 AM UTC daily
-    # Weekly source build to validate toolchain
-    - cron: '0 3 * * 0'  # 3 AM UTC on Sundays
-
-env:
-  # Force source build on weekly schedule or if setup files changed
-  FORCE_SOURCE_BUILD: ${{ (github.event.schedule == '0 3 * * 0') || contains(github.event.head_commit.modified, '.github/workflows/') || contains(github.event.head_commit.modified, 'tests/zephyr_setup.sh') }}
+    - cron: '0 2 * * *'  # 02:00 UTC nightly
 
 permissions:
   contents: read
-  packages: read  # pull devcontainer image from GHCR
 
 jobs:
-  cargo-test-suite:
+  cargo-check:
+    name: cargo check (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --workspace --all-targets
+
+  test-prebuilt:
+    name: cargo test (prebuilt, bare metal)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # `cargo xtask zephyr-setup --prebuilt` only needs to download
+        # tarballs into external/, so the nrf submodule is not required.
+        with:
+          submodules: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install BabbleSim runtime deps
+        # libglib2.0-0 -> bs_2G4_phy_v1 links against glib at runtime
+        # socat        -> spawn_zephyr_rpc_server_with_socat bridges PTY <-> Unix socket
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libglib2.0-0 socat
+
+      - name: cargo xtask zephyr-setup --prebuilt
+        run: cargo xtask zephyr-setup --prebuilt
+
+      - name: cargo test --workspace --lib
+        run: cargo test --workspace --lib
+
+      - name: cargo test --test integration_test
+        # BabbleSim spawns real processes per test under /tmp/bs_<user>/;
+        # serialize to avoid sim_id collisions.
+        run: cargo test --test integration_test -- --test-threads=1
+
+  test-source-build:
+    name: cargo test (source build, devcontainer)
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
 
     steps:
       - name: Free up disk space
         run: |
-          # Show initial disk usage
-          echo "=== Initial Disk Usage ==="
-          df -h
-          
-          # Remove unnecessary preinstalled software
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          
-          # Clean Docker
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           docker system prune -af --volumes || true
-          
-          # Show disk usage after cleanup
-          echo "=== After Cleanup ==="
           df -h
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: false
-
-      - name: Set image ref
-        id: image
+      - name: Add 8 GB of swap (Zephyr build can OOM otherwise)
         run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "ref=ghcr.io/${REPO}/devcontainer:latest" >> $GITHUB_OUTPUT
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Setup swap space
-        run: |
-          # Remove existing swapfile if present
           sudo swapoff /swapfile 2>/dev/null || true
           sudo rm -f /swapfile
-
-          # Create new swap
           sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           free -h
 
-      - name: Get nrf submodule SHA for cache key
-        id: nrf-sha
-        run: echo "sha=$(git submodule status tests/external/nrf | awk '{print $1}' | tr -d '+-' | cut -c1-8)" >> $GITHUB_OUTPUT
+      - name: Checkout repository
+        # Source build needs the nrf submodule for west to resolve manifests.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Download precompiled BabbleSim binaries
-        if: env.FORCE_SOURCE_BUILD != 'true'
-        run: |
-          echo "Attempting to download precompiled binaries..."
-          # Try to download from latest release
-          RELEASE_TAG="bsim-${{ steps.nrf-sha.outputs.sha }}-"
-          
-          # Find latest matching release
-          ASSET_URL=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases" \
-            | jq -r ".[] | select(.tag_name | startswith(\"${RELEASE_TAG}\")) | .assets[] | select(.name == \"bsim-binaries.tar.gz\") | .browser_download_url" \
-            | head -n1)
-          
-          if [ -n "$ASSET_URL" ]; then
-            echo "✓ Downloading from release: $ASSET_URL"
-            curl -L -o bsim-binaries.tar.gz "$ASSET_URL"
-          else
-            echo "::warning::No precompiled binaries found for SHA ${{ steps.nrf-sha.outputs.sha }}"
-            echo "::notice::Building from source. To speed up future runs, trigger 'Build BabbleSim Binaries' workflow."
-            echo "NEED_BUILD=true" >> $GITHUB_ENV
-          fi
+      - name: Install Rust toolchain (host, for `cargo xtask docker-build`)
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Download forced (nightly/setup changed)
-        if: env.FORCE_SOURCE_BUILD == 'true'
-        run: |
-          echo "::notice::Force building from source (nightly or setup changed)"
-          echo "NEED_BUILD=true" >> $GITHUB_ENV
+      - name: cargo xtask docker-build
+        run: cargo xtask docker-build
 
-      - name: Extract binaries
-        if: env.NEED_BUILD != 'true'
-        run: |
-          mkdir -p tests/external/tools/bsim
-          tar -xzf bsim-binaries.tar.gz -C tests/external/tools/bsim
-          
-      - name: Verify binaries
-        if: env.NEED_BUILD != 'true'
-        run: |
-          ls -lh tests/external/tools/bsim/bin/
-          chmod +x tests/external/tools/bsim/bin/*
-          
-          # Install required libraries
-          echo "Installing runtime dependencies..."
-          sudo apt-get update -qq
-          sudo apt-get install -y libglib2.0-0 || true
-          
-          # Check library dependencies
-          ldd tests/external/tools/bsim/bin/bs_2G4_phy_v1 || echo "Warning: library check failed"
-
-      - name: Pull or build devcontainer image (for Zephyr setup)
-        if: env.NEED_BUILD == 'true'
-        run: |
-          IMAGE="${{ steps.image.outputs.ref }}"
-          if docker pull "$IMAGE" 2>/dev/null; then
-            docker tag "$IMAGE" nrf-rpc-dev
-            echo "✓ Using cached devcontainer image from GHCR"
-          else
-            echo "::notice::No cached image found, building from source"
-            docker build \
-              --file .devcontainer/Dockerfile \
-              --platform linux/amd64 \
-              --tag nrf-rpc-dev \
-              .
-          fi
-
-      - name: Fix workspace permissions for container user
+      - name: Chown workspace to container UID 1000
         run: sudo chown -R 1000:1000 "$GITHUB_WORKSPACE"
 
-      - name: Run Zephyr setup (fallback if no precompiled binaries)
-        if: env.NEED_BUILD == 'true'
+      - name: cargo xtask zephyr-setup --build-from-source && cargo test
         run: |
           docker run --rm \
-            --memory=6g \
-            --memory-swap=14g \
-            -v "$GITHUB_WORKSPACE:/workspace" \
-            -w /workspace \
-            nrf-rpc-dev \
-            bash -lc "cd tests && ./zephyr_setup.sh --yes"
-      
-      - name: Restore workspace permissions for runner
-        if: env.NEED_BUILD == 'true'
-        run: sudo chown -R runner:runner "$GITHUB_WORKSPACE"
-      
-      - name: Final binary verification
-        run: |
-          echo "=== Checking for required binaries ==="
-          ls -lh tests/external/tools/bsim/bin/ || (echo "ERROR: BabbleSim bin directory not found" && exit 1)
-          
-          test -f tests/external/tools/bsim/bin/bs_2G4_phy_v1 && echo "✓ bs_2G4_phy_v1 found" || (echo "✗ bs_2G4_phy_v1 missing" && exit 1)
-          test -f tests/external/tools/bsim/bin/zephyr_rpc_server_app && echo "✓ zephyr_rpc_server_app found" || (echo "✗ zephyr_rpc_server_app missing" && exit 1)
-          test -f tests/external/tools/bsim/bin/cgm_peripheral_sample && echo "✓ cgm_peripheral_sample found" || (echo "✗ cgm_peripheral_sample missing" && exit 1)
-          
-          # Test binary execution
-          tests/external/tools/bsim/bin/bs_2G4_phy_v1 -h > /dev/null 2>&1 && echo "✓ bs_2G4_phy_v1 executable" || echo "⚠ bs_2G4_phy_v1 may need libraries"
-          
-          echo "=== Binary check complete ==="
-
-      - name: Pull or build devcontainer image (for tests)
-        if: env.NEED_BUILD != 'true'
-        run: |
-          IMAGE="${{ steps.image.outputs.ref }}"
-          if docker pull "$IMAGE" 2>/dev/null; then
-            docker tag "$IMAGE" nrf-rpc-dev
-            echo "✓ Using cached devcontainer image from GHCR"
-          else
-            echo "::notice::No cached image found, building from source"
-            docker build \
-              --file .devcontainer/Dockerfile \
-              --platform linux/amd64 \
-              --tag nrf-rpc-dev \
-              .
-          fi
-
-      - name: Run cargo test in container
-        run: |
-          docker run --rm \
+            --platform linux/amd64 \
             --memory=6g \
             --memory-swap=14g \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
             -e CARGO_HOME=/tmp/cargo \
             -e CARGO_TARGET_DIR=/tmp/target \
-            nrf-rpc-dev \
-            bash -lc "export LD_LIBRARY_PATH=/workspace/tests/external/tools/bsim/lib:\$LD_LIBRARY_PATH && export BSIM_OUT_PATH=/workspace/tests/external/tools/bsim && cargo test --lib --workspace && cargo test --test integration_test -- --test-threads=1"
+            nrf-sim-bridge:latest \
+            bash -lc '
+              set -euo pipefail
+              echo "=== cargo xtask zephyr-setup --build-from-source ==="
+              cargo xtask zephyr-setup --build-from-source
+              echo "=== cargo test --workspace --lib ==="
+              cargo test --workspace --lib
+              echo "=== cargo test --test integration_test ==="
+              cargo test --test integration_test -- --test-threads=1
+            '
 
-
-  cargo-compile-check:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Cargo check (compile test)
-        run: cargo check --workspace --all-targets
-
-
+      - name: Restore workspace permissions for runner
+        if: always()
+        run: sudo chown -R runner:runner "$GITHUB_WORKSPACE"

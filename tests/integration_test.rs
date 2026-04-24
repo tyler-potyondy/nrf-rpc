@@ -17,11 +17,12 @@ use nrf_rpc::ble::{
     ScanResultData,
 };
 use nrf_rpc::{AsyncTransport, RpcClient, TransportError, ble::Ble, uart_transport::Uart};
+use nrf_sim_bridge::{TestProcesses, spawn_zephyr_rpc_server_with_socat};
 use std::collections::HashSet;
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::process::{ChildStderr, ChildStdout};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 /// Mock error type
@@ -281,255 +282,87 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
         .collect()
 }
 
-const ZEPHY_RPC_SERVER_RUN_SCRIPT: &str = "run_bsim.sh";
-const TEST_DIRECTORY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/");
+const TEST_DIRECTORY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
+const BSIM_BIN_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/external/tools/bsim/bin");
 
-use std::io::BufReader;
-pub mod TestProcessInfra {
-    use std::{
-        collections::HashSet,
-        io::{BufReader, Lines},
-        process::ChildStdout,
-        sync::mpsc,
-        time::Duration,
-    };
-
-    type ZephyrServerProcess = std::process::Child;
-    type SocatProcess = std::process::Child;
-
-    pub struct TestProcesses {
-        rpc_server: ZephyrServerProcess,
-        rpc_server_stdout_rx: mpsc::Receiver<String>,
-        socat: SocatProcess,
-    }
-
-    impl TestProcesses {
-        pub fn new(
-            rpc_server: ZephyrServerProcess,
-            rpc_server_stdout: Lines<BufReader<ChildStdout>>,
-            socat: SocatProcess,
-        ) -> Self {
-            let (tx, rx) = mpsc::channel::<String>();
-
-            std::thread::spawn(move || {
-                for line in rpc_server_stdout {
-                    let Ok(line) = line else { break };
-                    if tx.send(line).is_err() {
-                        break;
-                    }
-                }
-            });
-
-            Self {
-                rpc_server,
-                rpc_server_stdout_rx: rx,
-                socat,
-            }
-        }
-
-        pub fn search_stdout_for_strings(&mut self, search_strings: HashSet<&str>) {
-            let mut missing_strings = search_strings.clone();
-            let deadline = std::time::Instant::now() + Duration::from_secs(20);
-
-            while std::time::Instant::now() < deadline {
-                if missing_strings.is_empty() {
-                    println!("Found all expected outputs!");
-                    return; // Test passed
-                }
-
-                let line = self.get_rpc_server_stdout_line(Duration::from_millis(200));
-                if let Some(line) = line {
-                    println!("{}", line);
-                    for search_string in search_strings.iter() {
-                        if line.contains(search_string) && missing_strings.remove(search_string) {
-                            println!("Found expected line: {}", line);
-                        }
-                    }
-                }
-            }
-
+/// One-shot environment precondition check. Runs the first time any test
+/// invokes `run_zephyr_rpc_server_exe`; subsequent calls are a no-op thanks to
+/// [`Once`]. Panics with an actionable error if BabbleSim isn't set up or a
+/// required system tool is missing — this prevents every test in the suite
+/// from failing with opaque spawn errors later.
+fn preflight_check() {
+    static PREFLIGHT: Once = Once::new();
+    PREFLIGHT.call_once(|| {
+        if !cfg!(target_os = "linux") {
             panic!(
-                "{}/{} expected outputs found. Missing: {:?}",
-                search_strings.len() - missing_strings.len(),
-                search_strings.len(),
-                missing_strings
+                "BabbleSim integration tests require Linux (current target: {}). \
+                 Rerun on either a linux machine or in container \
+                 (`cargo xtask docker-build && cargo xtask docker-attach`).",
+                std::env::consts::OS,
             );
         }
 
-        /// Call to get the next line of stdout from the RPC server process,
-        /// waiting up to `timeout`, and returning None if no line is available.
-        pub fn get_rpc_server_stdout_line(&mut self, timeout: Duration) -> Option<String> {
-            self.rpc_server_stdout_rx.recv_timeout(timeout).ok()
+        let bsim_bin = Path::new(BSIM_BIN_PATH);
+        for (label, bin) in [
+            ("BabbleSim PHY simulator", "bs_2G4_phy_v1"),
+            ("Zephyr RPC server app", "zephyr_rpc_server_app"),
+            ("CGM peripheral sample", "cgm_peripheral_sample"),
+        ] {
+            let path = bsim_bin.join(bin);
+            if !path.exists() {
+                panic!(
+                    "{label} binary missing at {}. \
+                     Run `cargo xtask zephyr-setup --prebuilt` (or `--build-from-source`) \
+                     inside the dev container to provision BabbleSim.",
+                    path.display(),
+                );
+            }
         }
 
-        fn kill(&mut self) {
-            println!("Killing test processes");
-            self.socat.kill().ok();
-
-            // Kill the RPC server process and its children.
-            // First try graceful termination, then force kill if needed.
-            let pid = self.rpc_server.id();
-
-            // Try SIGTERM first (graceful shutdown)
-            let _ = std::process::Command::new("kill")
-                .args([&format!("{}", pid)])
-                .output();
-
-            // Give it a moment to terminate gracefully
-            std::thread::sleep(std::time::Duration::from_millis(100));
-
-            // Force kill the specific process if still running
-            let _ = self.rpc_server.kill();
-
-            // Also try to kill any child processes specifically
-            // Using pkill with parent PID is safer than negative process group
-            let _ = std::process::Command::new("pkill")
-                .args(["-P", &format!("{}", pid)])
-                .output();
+        let socat_ok = std::process::Command::new("socat")
+            .arg("-V")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !socat_ok {
+            panic!(
+                "`socat` is required by the test harness but was not found on PATH. \
+                 Install it (`apt-get install socat`) or run inside the dev container \
+                 where it's pre-installed.",
+            );
         }
 
-        pub fn get_rpc_server(&mut self) -> &mut ZephyrServerProcess {
-            &mut self.rpc_server
-        }
-
-        pub fn get_socat(&mut self) -> &mut SocatProcess {
-            &mut self.socat
-        }
-    }
-
-    impl Drop for TestProcesses {
-        fn drop(&mut self) {
-            self.kill();
-        }
-    }
-}
-
-use TestProcessInfra::TestProcesses;
-
-fn print_process_output_failure(std_out: ChildStdout, std_err: ChildStderr) {
-    println!("======STDOUT======");
-    let reader = BufReader::new(std_out);
-    for line in reader.lines() {
-        if let Ok(line) = line {
-            println!("Process output: {}", line);
-        }
-    }
-
-    let reader = BufReader::new(std_err);
-    for line in reader.lines() {
-        if let Ok(line) = line {
-            println!("Process error output: {}", line);
-        }
-    }
-}
-
-/// Run the Zephyr RPC server script that launches the Babble Simulator
-/// and runs the RPC Server app.
-///
-/// This outputs verbose output we capture and will process later to determine
-/// if the client/server are working properly.
-fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockUart) {
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    let mut rpc_server = Command::new("bash")
-        .current_dir(TEST_DIRECTORY_PATH) // Set working directory
-        .arg(ZEPHY_RPC_SERVER_RUN_SCRIPT)
-        .arg(test_name)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Put the script and all its children into a new process group
-        // so we can kill them all at once with kill
-        .process_group(0)
-        .spawn()
-        .expect("Failed to start Zephyr RPC server");
-
-    // See if process failed to start.
-    if let Some(status) = rpc_server.try_wait().expect("Failed to wait on process") {
-        panic!(
-            "RPC server process exited immediately with status: {}",
-            status
+        println!(
+            "Preflight OK: OS=linux, BabbleSim binaries present in {}, socat available.",
+            bsim_bin.display(),
         );
-    }
-
-    // Block until see: "UART 0 (UARTE0) connected to pseudotty: /dev/pts/XX"
-    let rpc_server_stdout = rpc_server.stdout.take().expect("Failed to capture stdout");
-    let reader = BufReader::new(rpc_server_stdout);
-    let mut lines = reader.lines();
-    let interface = loop {
-        let line = match lines.next() {
-            Some(line) => line,
-            None => {
-                // Process exited before finding interface - print stderr for diagnostics
-                println!("======STDERR======");
-                if let Some(stderr) = rpc_server.stderr.take() {
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            println!("Process error output: {}", line);
-                        }
-                    }
-                }
-                panic!("Bsim test process exited before finding UART interface");
-            }
-        };
-        if let Ok(line) = line {
-            if line.contains("UART 0 (UARTE0) connected to pseudotty") {
-                // Extract the interface name from the line
-                if let Some(start) = line.find("/dev/pts/") {
-                    let interface = line[start..].trim().to_string();
-                    println!("Found interface: {}", interface);
-                    break interface;
-                }
-            }
-        } else {
-            panic!("EOF or error before finding interface");
-        }
-    };
-
-    let socket_path = test_socket_path(test_name);
-    let socat = create_socat_socket(&interface, &socket_path);
-    let uart = MockUart::new(&socket_path);
-    (TestProcesses::new(rpc_server, lines, socat), uart)
+    });
 }
 
-fn test_socket_path(test_name: &str) -> String {
-    let mut socket_path = std::env::temp_dir();
-    socket_path.push(format!("nrf_rpc_{}_{}.sock", std::process::id(), test_name));
-    socket_path.to_string_lossy().into_owned()
-}
-
-fn create_socat_socket(pty_port: &str, socket_path: &str) -> std::process::Child {
-    use std::process::Command;
-    use std::{fs, io};
-
-    // Remove any stale socket file from a previous test run. If the file does
-    // not exist, ignore the error.
-    match fs::remove_file(socket_path) {
-        Ok(_) => {
-            println!("Removed existing socat socket at {}", socket_path);
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => {
-            panic!(
-                "Failed to remove existing socat socket at {}: {}",
-                socket_path, e
-            );
-        }
-    }
-
-    Command::new("socat")
-        // Listen on the UNIX socket and forward to the existing Zephyr PTY.
-        // The PTY path we get from the server log (e.g. /dev/pts/4) is an
-        // already-existing device, so we use FILE: instead of creating a new
-        // PTY with link=.
-        .arg(format!("UNIX-LISTEN:{}", socket_path))
-        .arg(format!("FILE:{},raw,echo=0", pty_port))
-        .spawn()
-        .expect("Failed to start socat")
+/// Spawn the full BabbleSim stack (PHY + Zephyr RPC server + CGM peripheral + socat bridge)
+/// via `nrf-sim-bridge`, and return the managed [`TestProcesses`] handle plus a
+/// [`MockUart`] connected to the socat-backed UNIX socket.
+///
+/// Automatically runs [`preflight_check`] on first use so tests fail fast with
+/// an actionable error if the sim environment isn't set up.
+fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockUart) {
+    preflight_check();
+    let tests_dir = Path::new(TEST_DIRECTORY_PATH);
+    let (processes, socket_path) = spawn_zephyr_rpc_server_with_socat(tests_dir, test_name);
+    let socket_path_str = socket_path
+        .to_str()
+        .expect("socket path must be valid UTF-8");
+    let uart = MockUart::new(socket_path_str);
+    (processes, uart)
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Basic functionality test to launch server. No client interactions for this test.
 fn test_zephyr_rpc_server() {
     println!("Starting Zephyr RPC server test to test that the server launches properly.");
@@ -542,6 +375,10 @@ fn test_zephyr_rpc_server() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Test the client can send a packet and receive an ACK.
 fn test_client_can_send_packet() {
     println!("Starting client can send packet test...");
@@ -565,6 +402,10 @@ fn test_client_can_send_packet() {
 // }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 fn test_client_group_handshake() {
     println!("Starting client group handshake test...");
 
@@ -577,6 +418,10 @@ fn test_client_group_handshake() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 fn test_bt_enable_initializes_bluetooth() {
     println!("Starting bt_enable integration test...");
 
@@ -597,6 +442,10 @@ fn test_bt_enable_initializes_bluetooth() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 fn test_bt_begin_advertising() {
     println!("Starting bt_begin_advertising integration test...");
 
@@ -686,6 +535,10 @@ fn cgm_ble_init(uart: MockUart) -> Ble<MockUart> {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Test that BLE scanning can be started and stopped successfully.
 ///
 /// This verifies that the bt_le_scan_start RPC command is correctly encoded
@@ -739,6 +592,10 @@ fn test_cgm_scan_start_stop() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Test that bt_enable + scan start works and the server initializes properly.
 ///
 /// This is a simpler smoke test for the CGM central flow — just enabling BT
@@ -774,6 +631,10 @@ fn test_cgm_bt_enable_and_scan() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Smoke-test CGM GATT discovery: init BLE, start scan, verify the RPC
 /// commands are accepted by the server.
 ///
@@ -821,6 +682,10 @@ fn test_cgm_gatt_discover() {
 // =============================================================================
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "BabbleSim integration tests require Linux. Rerun on either a linux machine or in container."
+)]
 /// Full CGM Central flow: discover → connect → verify.
 ///
 /// This test exercises the complete BLE central pipeline against the CGM
