@@ -1,4 +1,0 @@
-[submodule "external/nrf"]
-	path = external/nrf
-	url = https://github.com/PLSysSec/sdk-nrf/
-	branch = cgm-bsim
