@@ -475,10 +475,10 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 5;
+        let retry_count = 20;
         for i in 0..retry_count {
             if i > 0 {
-                self.transport.delay_ms(100).await;
+                self.transport.delay_ms(200).await;
             }
 
             let mut buffer = [0u8; 256];
@@ -522,7 +522,7 @@ impl<T: AsyncTransport> RpcClient<T> {
             }
         }
 
-        Err(RpcError::NoResponse)
+        Err(RpcError::Timeout)
     }
 
     /// Send a command packet and decode an i32 CBOR return value from the response payload.
@@ -538,11 +538,11 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 5;
+        let retry_count = 20;
         for i in 0..retry_count {
             // Wait before retrying (except for the first attempt)
             if i > 0 {
-                self.transport.delay_ms(100).await;
+                self.transport.delay_ms(200).await;
             }
 
             // Receive the corresponding response
@@ -592,7 +592,7 @@ impl<T: AsyncTransport> RpcClient<T> {
             }
         }
 
-        Err(RpcError::NoResponse)
+        Err(RpcError::Timeout)
     }
 
     /// Like `send_command_and_get_i32`, but ACKs any interleaved server Command
@@ -610,10 +610,10 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 5;
+        let retry_count = 20;
         for i in 0..retry_count {
             if i > 0 {
-                self.transport.delay_ms(100).await;
+                self.transport.delay_ms(200).await;
             }
 
             let mut buffer = [0u8; 256];
@@ -659,7 +659,7 @@ impl<T: AsyncTransport> RpcClient<T> {
             }
         }
 
-        Err(RpcError::NoResponse)
+        Err(RpcError::Timeout)
     }
 
     /// Like `send_command_and_get_i32`, but ACKs any interleaved server Command
@@ -676,10 +676,10 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 5;
+        let retry_count = 20;
         for i in 0..retry_count {
             if i > 0 {
-                self.transport.delay_ms(100).await;
+                self.transport.delay_ms(200).await;
             }
 
             let mut buffer = [0u8; 256];
@@ -725,7 +725,7 @@ impl<T: AsyncTransport> RpcClient<T> {
             }
         }
 
-        Err(RpcError::NoResponse)
+        Err(RpcError::Timeout)
     }
 
     /// Smart ACK variant of `send_command_and_get_i32`.
@@ -748,10 +748,10 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 5;
+        let retry_count = 20;
         for i in 0..retry_count {
             if i > 0 {
-                self.transport.delay_ms(100).await;
+                self.transport.delay_ms(200).await;
             }
 
             let mut buffer = [0u8; 256];
@@ -807,7 +807,7 @@ impl<T: AsyncTransport> RpcClient<T> {
             }
         }
 
-        Err(RpcError::NoResponse)
+        Err(RpcError::Timeout)
     }
 
     pub(crate) async fn receive_packet<'a>(
@@ -819,7 +819,7 @@ impl<T: AsyncTransport> RpcClient<T> {
             .transport
             .read(output)
             .await
-            .expect("Failed to receive packet");
+            .map_err(|_| RpcError::Transport)?;
 
         let mut output_pkt_list: [Option<ParsedNrfRpcPacket<'a>>; 5] = [const { None }; 5];
         let mut packet_index = 0;
