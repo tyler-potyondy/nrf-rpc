@@ -1,4 +1,4 @@
-use nrf_rpc::{AsyncTransport, TransportError, ble::Ble};
+use nrf_rpc::{TransportError, ble::Ble, uart_transport::{Uart, UartTransport}};
 use std::sync::{Arc, Mutex};
 
 /// Simple in-memory UART used to unit test higher-level BLE behavior without
@@ -42,10 +42,8 @@ impl DummyUart {
     }
 }
 
-impl AsyncTransport for DummyUart {
+impl Uart for DummyUart {
     type Error = DummyError;
-    type TxTransportPacket<'a> = nrf_rpc::uart_transport::UartTxTransport<'a>;
-    type RxTransportPacket<'a> = nrf_rpc::uart_transport::UartRxTransport<'a>;
 
     async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         let mut state = self.state.lock().unwrap();
@@ -58,7 +56,6 @@ impl AsyncTransport for DummyUart {
         // Provide a valid response for the first two reads (bt_enable and
         // settings load), then behave like an empty read.
         if state.read_calls >= 2 {
-            // No more data; behave like a non-blocking empty read.
             return Ok(0);
         }
 
@@ -68,9 +65,7 @@ impl AsyncTransport for DummyUart {
         Ok(n)
     }
 
-    async fn delay_ms(&mut self, _ms: u32) {
-        // No-op for tests
-    }
+    async fn delay_ms(&mut self, _ms: u32) {}
 }
 
 /// Minimal async executor for this test - same pattern as in integration_test.rs.
@@ -143,7 +138,7 @@ fn test_bt_enable_uses_enable_command_and_parses_status() {
     let state_handle = uart.state();
 
     // Initialize BLE client without a real server behind the transport.
-    let mut ble = block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
+    let mut ble = block_on(Ble::new(UartTransport::new(uart))).expect("Failed to initialize BLE client");
 
     // Drop any packets sent during init; we only care about bt_enable traffic.
     {
