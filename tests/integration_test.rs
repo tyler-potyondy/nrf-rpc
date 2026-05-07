@@ -16,8 +16,8 @@ use nrf_rpc::ble::{
     BtGattDiscoverType, BtGattSubscribeParams, BtLeConnParam, BtLeScanParam, GattDiscoverResult,
     ScanResultData,
 };
+use babble_bridge::{TestProcesses, spawn_zephyr_rpc_server_with_socat};
 use nrf_rpc::{RpcClient, TransportError, ble::Ble, uart_transport::{Uart, UartTransport}};
-use nrf_sim_bridge::{TestProcesses, spawn_zephyr_rpc_server_with_socat};
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -300,7 +300,7 @@ fn preflight_check() {
 }
 
 /// Spawn the full BabbleSim stack (PHY + Zephyr RPC server + CGM peripheral + socat bridge)
-/// via `nrf-sim-bridge`, and return the managed [`TestProcesses`] handle plus a
+/// via `babble-bridge`, and return the managed [`TestProcesses`] handle plus a
 /// [`MockUart`] connected to the socat-backed UNIX socket.
 ///
 /// Automatically runs [`preflight_check`] on first use so tests fail fast with

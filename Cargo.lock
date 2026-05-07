@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "babble-bridge"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "959eea2e8b897f7edda04da4b968a1c7be506de46bb63feac551bedda1b4573c"
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -183,11 +189,11 @@ checksum = "c0452a60c1863c1f50b5f77cd295e8d2786849f35883f0b9e18e7e6e1b5691b0"
 name = "nrf-rpc"
 version = "0.1.0"
 dependencies = [
+ "babble-bridge",
  "embassy-executor",
  "embassy-futures",
  "minicbor",
  "nrf-rpc-codegen",
- "nrf-sim-bridge",
  "serial_test",
 ]
 
@@ -200,11 +206,6 @@ dependencies = [
  "quote",
  "syn",
 ]
-
-[[package]]
-name = "nrf-sim-bridge"
-version = "0.1.0"
-source = "git+https://github.com/tyler-potyondy/nrf-sim-bridge#9fde9c0c61f0849af2168f12dbc5277a056f2590"
 
 [[package]]
 name = "once_cell"
@@ -360,5 +361,5 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "nrf-sim-bridge",
+ "babble-bridge",
 ]
