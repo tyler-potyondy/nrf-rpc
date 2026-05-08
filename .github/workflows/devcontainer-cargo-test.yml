@@ -9,7 +9,7 @@ name: cargo test
 #   - test-source-build: full Zephyr/BabbleSim build from source inside the
 #     dev container (`cargo xtask docker-build` -> `cargo xtask zephyr-setup
 #     --build-from-source`). Slow but validates the Dockerfile and the
-#     Zephyr toolchain end-to-end. Nightly only.
+#     Zephyr toolchain end-to-end. Nightly by default; can be run manually.
 
 on:
   push:
@@ -19,6 +19,23 @@ on:
   pull_request:
   schedule:
     - cron: '0 2 * * *'  # 02:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      run_cargo_check:
+        description: Run cargo-check job
+        type: boolean
+        required: true
+        default: true
+      run_test_prebuilt:
+        description: Run prebuilt test job
+        type: boolean
+        required: true
+        default: true
+      run_test_source_build:
+        description: Run source-build test job
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -26,6 +43,7 @@ permissions:
 jobs:
   cargo-check:
     name: cargo check (host)
+    if: github.event_name != 'workflow_dispatch' || inputs.run_cargo_check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +52,7 @@ jobs:
 
   test-prebuilt:
     name: cargo test (prebuilt, bare metal)
+    if: github.event_name != 'workflow_dispatch' || inputs.run_test_prebuilt
     runs-on: ubuntu-latest
 
     steps:
@@ -67,7 +86,7 @@ jobs:
 
   test-source-build:
     name: cargo test (source build, devcontainer)
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_test_source_build)
     runs-on: ubuntu-latest
 
     steps:
