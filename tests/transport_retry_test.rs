@@ -25,7 +25,7 @@
 //! `Err(RpcError::Timeout)`.
 
 use embassy_futures::block_on;
-use nrf_rpc::{AsyncTransport, RpcError, TransportError, ble::Ble};
+use nrf_rpc::{RpcError, TransportError, ble::Ble, uart_transport::{Uart, UartTransport}};
 use std::sync::{Arc, Mutex};
 
 // ── shared error / helper ─────────────────────────────────────────────────────
@@ -92,11 +92,8 @@ fn make_i32_response_frame(value: i32) -> Vec<u8> {
 /// `Err(RpcError::Timeout)` — no panic.
 struct AlwaysErrTransport;
 
-impl AsyncTransport for AlwaysErrTransport {
+impl Uart for AlwaysErrTransport {
     type Error = MockError;
-    type TxTransportPacket<'a> = nrf_rpc::uart_transport::UartTxTransport<'a>;
-    type RxTransportPacket<'a> = nrf_rpc::uart_transport::UartRxTransport<'a>;
-
     async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         Ok(data.len())
     }
@@ -125,11 +122,8 @@ impl FailThenSucceedTransport {
     }
 }
 
-impl AsyncTransport for FailThenSucceedTransport {
+impl Uart for FailThenSucceedTransport {
     type Error = MockError;
-    type TxTransportPacket<'a> = nrf_rpc::uart_transport::UartTxTransport<'a>;
-    type RxTransportPacket<'a> = nrf_rpc::uart_transport::UartRxTransport<'a>;
-
     async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         Ok(data.len())
     }
@@ -154,11 +148,8 @@ impl AsyncTransport for FailThenSucceedTransport {
 /// **After Fix 2**: returns `Err(RpcError::Timeout)` after 20 retries.
 struct NoDataTransport;
 
-impl AsyncTransport for NoDataTransport {
+impl Uart for NoDataTransport {
     type Error = MockError;
-    type TxTransportPacket<'a> = nrf_rpc::uart_transport::UartTxTransport<'a>;
-    type RxTransportPacket<'a> = nrf_rpc::uart_transport::UartRxTransport<'a>;
-
     async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         Ok(data.len())
     }
@@ -187,11 +178,8 @@ impl EmptyThenSucceedTransport {
     }
 }
 
-impl AsyncTransport for EmptyThenSucceedTransport {
+impl Uart for EmptyThenSucceedTransport {
     type Error = MockError;
-    type TxTransportPacket<'a> = nrf_rpc::uart_transport::UartTxTransport<'a>;
-    type RxTransportPacket<'a> = nrf_rpc::uart_transport::UartRxTransport<'a>;
-
     async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         Ok(data.len())
     }
@@ -224,7 +212,7 @@ impl AsyncTransport for EmptyThenSucceedTransport {
 #[test]
 fn test_transport_read_error_propagates_as_timeout_not_panic() {
     let mut ble =
-        block_on(Ble::new(AlwaysErrTransport)).expect("Ble::new must succeed (init only writes)");
+        block_on(Ble::new(UartTransport::new(AlwaysErrTransport))).expect("Ble::new must succeed (init only writes)");
 
     let result = block_on(ble.bt_enable(None));
 
@@ -256,7 +244,7 @@ fn test_transport_error_then_success_on_retry() {
     let response = make_i32_response_frame(0);
     let transport = FailThenSucceedTransport::new(3, response);
     let mut ble =
-        block_on(Ble::new(transport)).expect("Ble::new must succeed (init only writes)");
+        block_on(Ble::new(UartTransport::new(transport))).expect("Ble::new must succeed (init only writes)");
 
     let result = block_on(ble.bt_enable(None));
 
@@ -284,7 +272,7 @@ fn test_transport_error_then_success_on_retry() {
 #[test]
 fn test_exhausted_retries_return_timeout_not_no_response() {
     let mut ble =
-        block_on(Ble::new(NoDataTransport)).expect("Ble::new must succeed (init only writes)");
+        block_on(Ble::new(UartTransport::new(NoDataTransport))).expect("Ble::new must succeed (init only writes)");
 
     let result = block_on(ble.bt_enable(None));
 
@@ -316,7 +304,7 @@ fn test_late_response_succeeds_within_expanded_retry_window() {
     // 10 empty reads — beyond the old 5-retry limit, within the new 20-retry limit.
     let transport = EmptyThenSucceedTransport::new(10, response);
     let mut ble =
-        block_on(Ble::new(transport)).expect("Ble::new must succeed (init only writes)");
+        block_on(Ble::new(UartTransport::new(transport))).expect("Ble::new must succeed (init only writes)");
 
     let result = block_on(ble.bt_enable(None));
 

@@ -16,8 +16,8 @@ use nrf_rpc::ble::{
     BtGattDiscoverType, BtGattSubscribeParams, BtLeConnParam, BtLeScanParam, GattDiscoverResult,
     ScanResultData,
 };
-use nrf_rpc::{AsyncTransport, RpcClient, TransportError, ble::Ble, uart_transport::Uart};
-use nrf_sim_bridge::{TestProcesses, spawn_zephyr_rpc_server_with_socat};
+use babble_bridge::{TestProcesses, spawn_zephyr_rpc_server_with_socat};
+use nrf_rpc::{RpcClient, TransportError, ble::Ble, uart_transport::{Uart, UartTransport}};
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -147,15 +147,51 @@ impl MockUart {
     }
 }
 
-impl Uart for MockUart {}
-
-impl AsyncTransport for MockUart {
+impl Uart for MockUart {
     type Error = MockError;
-    type TxTransportPacket<'a> = nrf_rpc::uart_transport::UartTxTransport<'a>;
-    type RxTransportPacket<'a> = nrf_rpc::uart_transport::UartRxTransport<'a>;
+
+    /// Deliver raw bytes as soon as any are available in the RX buffer.
+    ///
+    /// HDLC frame accumulation is handled by [`UartTransport`], so this method
+    /// just blocks until at least one byte arrives (or a 5 s timeout fires) then
+    /// drains whatever is buffered — no HDLC scanning required here.
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
+        use std::time::{Duration, Instant};
+
+        let timeout = Duration::from_secs(5);
+        let start = Instant::now();
+
+        loop {
+            {
+                let mut rx = self.rx_buffer.lock().unwrap();
+                if !rx.is_empty() {
+                    let n = core::cmp::min(buffer.len(), rx.len());
+                    buffer[..n].copy_from_slice(&rx[..n]);
+                    rx.drain(0..n);
+
+                    println!(
+                        "MockUart: Delivering {} bytes from RX buffer to client: {:02X?}",
+                        n,
+                        &buffer[..n]
+                    );
+
+                    return Ok(n);
+                }
+            }
+
+            if start.elapsed() >= timeout {
+                println!(
+                    "MockUart: Read timeout from RX buffer for socat socket {}",
+                    self.socat_socket_path
+                );
+                return Ok(0);
+            }
+
+            std::thread::yield_now();
+        }
+    }
 
     async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
-        // Log the packet being sent
         println!(
             "MockUart: Sending {} bytes to {}: {:02X?}",
             data.len(),
@@ -163,11 +199,8 @@ impl AsyncTransport for MockUart {
             data
         );
 
-        // Record locally for inspection by tests if needed
         self.sent_packets.lock().unwrap().push(data.to_vec());
 
-        // Forward the bytes to the socat UNIX socket so that the Zephyr UART
-        // endpoint actually receives the frame.
         if let Err(e) = self.socket.write_all(data) {
             println!(
                 "MockUart: Failed to write {} bytes to socat socket {}: {}",
@@ -181,88 +214,13 @@ impl AsyncTransport for MockUart {
         if let Err(e) = self.socket.flush() {
             println!(
                 "MockUart: Failed to flush socat socket {}: {}",
-                self.socat_socket_path, e
+                self.socat_socket_path,
+                e
             );
             return Err(MockError);
         }
 
         Ok(data.len())
-    }
-
-    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
-        use std::time::{Duration, Instant};
-
-        const HDLC_DELIMITER: u8 = 0x7E;
-
-        // Instead of sleeping a fixed coalescing delay (which wastes BSIM
-        // simulated time), we scan the RX buffer for complete HDLC frames.
-        // A complete frame is delimited by two 0x7E bytes. We only deliver
-        // bytes up through the last complete frame's closing delimiter,
-        // keeping any partial trailing frame in the buffer for the next read.
-        //
-        // This eliminates all wall-clock sleeps from the data path, so the
-        // RPC client runs at the same speed as BSIM — no simulated time is
-        // wasted waiting for real-time coalescing delays.
-        let timeout = Duration::from_secs(5);
-        let start = Instant::now();
-
-        loop {
-            {
-                let rx = self.rx_buffer.lock().unwrap();
-                if rx.len() >= 2 {
-                    // Scan for complete HDLC frames. We need at least two
-                    // 0x7E bytes: one opening and one closing delimiter.
-                    // Find the last position we can deliver (the closing
-                    // delimiter of the last complete frame).
-                    let mut delimiter_count = 0u32;
-                    let mut last_complete_frame_end: Option<usize> = None;
-
-                    for (i, &byte) in rx.iter().enumerate() {
-                        if byte == HDLC_DELIMITER {
-                            delimiter_count += 1;
-                            // Every even-numbered delimiter (2nd, 4th, ...)
-                            // closes a frame. But HDLC frames share
-                            // delimiters: the closing 7E of frame N is the
-                            // opening 7E of frame N+1. So after the first
-                            // delimiter, every subsequent delimiter closes
-                            // a frame.
-                            if delimiter_count >= 2 {
-                                last_complete_frame_end = Some(i);
-                            }
-                        }
-                    }
-
-                    if let Some(end_pos) = last_complete_frame_end {
-                        let n = core::cmp::min(buffer.len(), end_pos + 1);
-                        drop(rx);
-
-                        let mut rx = self.rx_buffer.lock().unwrap();
-                        buffer[..n].copy_from_slice(&rx[..n]);
-                        rx.drain(0..n);
-
-                        println!(
-                            "MockUart: Delivering {} bytes from RX buffer to client: {:02X?}",
-                            n,
-                            &buffer[..n]
-                        );
-
-                        return Ok(n);
-                    }
-                }
-            }
-
-            if start.elapsed() >= timeout {
-                println!(
-                    "MockUart: Read timeout from RX buffer for socat socket {}",
-                    self.socat_socket_path
-                );
-                return Ok(0);
-            }
-
-            // Yield briefly so the RX thread can fill the buffer.
-            // This is just a scheduling yield, not a coalescing delay.
-            std::thread::yield_now();
-        }
     }
 
     async fn delay_ms(&mut self, ms: u32) {
@@ -342,12 +300,15 @@ fn preflight_check() {
 }
 
 /// Spawn the full BabbleSim stack (PHY + Zephyr RPC server + CGM peripheral + socat bridge)
-/// via `nrf-sim-bridge`, and return the managed [`TestProcesses`] handle plus a
+/// via `babble-bridge`, and return the managed [`TestProcesses`] handle plus a
 /// [`MockUart`] connected to the socat-backed UNIX socket.
 ///
 /// Automatically runs [`preflight_check`] on first use so tests fail fast with
 /// an actionable error if the sim environment isn't set up.
-fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockUart) {
+/// Convenience alias — the transport type used by all integration tests.
+type MockTransport = UartTransport<MockUart>;
+
+fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockTransport) {
     preflight_check();
     let tests_dir = Path::new(TEST_DIRECTORY_PATH);
     let (processes, socket_path) = spawn_zephyr_rpc_server_with_socat(tests_dir, test_name);
@@ -355,7 +316,7 @@ fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockUart) {
         .to_str()
         .expect("socket path must be valid UTF-8");
     let uart = MockUart::new(socket_path_str);
-    (processes, uart)
+    (processes, UartTransport::new(uart))
 }
 
 #[test]
@@ -475,9 +436,9 @@ fn test_bt_begin_advertising() {
     ]));
 }
 
-fn client_test_helper(uart: MockUart) -> RpcClient<MockUart> {
+fn client_test_helper(uart: MockTransport) -> RpcClient<MockTransport> {
     std::thread::sleep(Duration::from_secs(1));
-    let mut client: RpcClient<MockUart> = RpcClient::new(uart);
+    let mut client: RpcClient<MockTransport> = RpcClient::new(uart);
     embassy_futures::block_on(client.init()).expect("Failed to initialize client");
 
     client
@@ -488,7 +449,7 @@ fn client_test_helper(uart: MockUart) -> RpcClient<MockUart> {
 // =============================================================================
 
 /// Helper: Initialize BLE client with bt_enable and connection callback registration.
-fn cgm_ble_init(uart: MockUart) -> Ble<MockUart> {
+fn cgm_ble_init(uart: MockTransport) -> Ble<MockTransport> {
     let mut ble =
         embassy_futures::block_on(Ble::new(uart)).expect("Failed to initialize BLE client");
 

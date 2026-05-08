@@ -3,7 +3,7 @@ extern crate alloc;
 mod utils;
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::cell::RefCell;
-use nrf_rpc::ble::Ble;
+use nrf_rpc::{ble::Ble, uart_transport::UartTransport};
 
 // #[test]
 fn test_rpc_init_packets() {
@@ -12,7 +12,7 @@ fn test_rpc_init_packets() {
     };
 
     let mock_uart_clone = mock_uart.clone();
-    let result = utils::block_on(Box::pin(async { Ble::new(mock_uart_clone).await }));
+    let result = utils::block_on(Box::pin(async { Ble::new(UartTransport::new(mock_uart_clone)).await }));
 
     assert!(
         result.is_ok(),

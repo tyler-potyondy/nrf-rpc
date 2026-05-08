@@ -7,7 +7,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::ptr;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable};
-use nrf_rpc::{AsyncTransport, TransportError};
+use nrf_rpc::{TransportError, uart_transport::Uart};
 
 /// Simple blocking executor for tests - only works for futures that are immediately ready
 pub fn block_on<F: Future + Unpin>(mut fut: F) -> F::Output {
@@ -33,7 +33,9 @@ pub fn block_on<F: Future + Unpin>(mut fut: F) -> F::Output {
     }
 }
 
-/// Mock UART transport for testing - returns immediately
+/// Mock UART byte source for unit tests — records transmitted bytes and returns
+/// no data on reads. Wrap with [`nrf_rpc::uart_transport::UartTransport`] to
+/// obtain a full [`nrf_rpc::AsyncTransport`].
 #[derive(Clone)]
 pub struct MockUart {
     pub transmitted: Rc<RefCell<Vec<u8>>>,
@@ -44,21 +46,17 @@ pub struct MockError;
 
 impl TransportError for MockError {}
 
-impl AsyncTransport for MockUart {
+impl Uart for MockUart {
     type Error = MockError;
-    type TxTransportPacket<'a> = nrf_rpc::uart_transport::UartTxTransport<'a>;
-    type RxTransportPacket<'a> = nrf_rpc::uart_transport::UartRxTransport<'a>;
+
+    async fn read(&mut self, _buffer: &mut [u8]) -> Result<usize, Self::Error> {
+        Ok(0)
+    }
 
     async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         self.transmitted.borrow_mut().extend_from_slice(data);
         Ok(data.len())
     }
 
-    async fn read(&mut self, _buffer: &mut [u8]) -> Result<usize, Self::Error> {
-        Ok(0)
-    }
-
-    async fn delay_ms(&mut self, _ms: u32) {
-        // No-op for tests
-    }
+    async fn delay_ms(&mut self, _ms: u32) {}
 }

@@ -157,6 +157,15 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send rpc_utils init packet");
 
+        // The server echoes both Init packets back as part of the nRF RPC group-
+        // registration handshake. Drain them now so they don't sit in the RX
+        // buffer and get consumed by the first real command (e.g. bt_enable).
+        // One receive_packet call is sufficient: the transport typically delivers
+        // both echoes together in the same read, and the HDLC accumulation loop
+        // will capture all complete frames in that burst.
+        let mut drain_buf = [0u8; 256];
+        let _ = self.receive_packet(&mut drain_buf).await;
+
         Ok(())
     }
 
@@ -470,34 +479,26 @@ impl<T: AsyncTransport> RpcClient<T> {
         &mut self,
         packet: NrfRpcPacket<'_, crate::packet::Command>,
     ) -> Result<(), RpcError> {
-        // Send the command
         self.send_packet(packet)
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 20;
-        for i in 0..retry_count {
-            if i > 0 {
-                self.transport.delay_ms(200).await;
-            }
-
+        // Read frames until we find the void Response. The server may send
+        // interleaved Init or Command frames before the Response (e.g. nRF RPC
+        // group re-advertisements after bt_enable). Each receive_packet call
+        // blocks on the transport until data arrives — no artificial delay.
+        // Transient transport errors (e.g. server not yet ready) are retried;
+        // after 20 attempts without a Response we return Err(RpcError::Timeout).
+        for _ in 0..20 {
             let mut buffer = [0u8; 256];
             let recv_packet_list = match self.receive_packet(&mut buffer).await {
                 Ok(list) => list,
-                Err(_) => {
-                    // Transport or parse error (e.g. partial HDLC frame).
-                    // Retry – the rest of the data may arrive on the next read.
-                    continue;
-                }
+                Err(_) => continue,
             };
-
-            let mut got_void_response = false;
 
             for recv_packet in recv_packet_list.into_iter().flatten() {
                 match recv_packet.packet_type {
                     TypeField::Command => {
-                        // Server-initiated event arrived while waiting for our response.
-                        // ACK it appropriately and save for later retrieval.
                         let cmd_id: u8 = recv_packet.command_id.into();
                         let src_ctx: u8 = recv_packet.src_context_id.into();
                         let src_grp: u8 = recv_packet.src_group_id.into();
@@ -510,15 +511,11 @@ impl<T: AsyncTransport> RpcClient<T> {
                     }
                     TypeField::Response => {
                         if let ParsedPayload::Cbor(_) = recv_packet.payload {
-                            got_void_response = true;
+                            return Ok(());
                         }
                     }
                     _ => {}
                 }
-            }
-
-            if got_void_response {
-                return Ok(());
             }
         }
 
@@ -533,36 +530,20 @@ impl<T: AsyncTransport> RpcClient<T> {
         &mut self,
         packet: NrfRpcPacket<'_, crate::packet::Command>,
     ) -> Result<i32, RpcError> {
-        // Send the command
         self.send_packet(packet)
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 20;
-        for i in 0..retry_count {
-            // Wait before retrying (except for the first attempt)
-            if i > 0 {
-                self.transport.delay_ms(200).await;
-            }
-
-            // Receive the corresponding response
+        for _ in 0..20 {
             let mut buffer = [0u8; 256];
             let recv_packet_list = match self.receive_packet(&mut buffer).await {
                 Ok(list) => list,
-                Err(_) => {
-                    // Transport or parse error (e.g. partial HDLC frame).
-                    // Retry – the rest of the data may arrive on the next read.
-                    continue;
-                }
+                Err(_) => continue,
             };
-
-            let mut response_value: Option<i32> = None;
 
             for recv_packet in recv_packet_list.into_iter().flatten() {
                 match recv_packet.packet_type {
                     TypeField::Command => {
-                        // Server-initiated event arrived while waiting for our response.
-                        // ACK it appropriately and save for later retrieval.
                         let cmd_id: u8 = recv_packet.command_id.into();
                         let src_ctx: u8 = recv_packet.src_context_id.into();
                         let src_grp: u8 = recv_packet.src_group_id.into();
@@ -574,21 +555,12 @@ impl<T: AsyncTransport> RpcClient<T> {
                         let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
                     }
                     TypeField::Response => {
-                        if response_value.is_none() {
-                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                                response_value = Some(
-                                    self.decode_i32_response(payload.into())
-                                        .expect("Failed to decode i32 response"),
-                                );
-                            }
+                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                            return self.decode_i32_response(payload.into());
                         }
                     }
                     _ => {}
                 }
-            }
-
-            if let Some(val) = response_value {
-                return Ok(val);
             }
         }
 
@@ -610,19 +582,12 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 20;
-        for i in 0..retry_count {
-            if i > 0 {
-                self.transport.delay_ms(200).await;
-            }
-
+        for _ in 0..20 {
             let mut buffer = [0u8; 256];
             let recv_packet_list = match self.receive_packet(&mut buffer).await {
                 Ok(list) => list,
                 Err(_) => continue,
             };
-
-            let mut response_value: Option<i32> = None;
 
             for recv_packet in recv_packet_list.into_iter().flatten() {
                 match recv_packet.packet_type {
@@ -635,27 +600,17 @@ impl<T: AsyncTransport> RpcClient<T> {
                             let payload_bytes: &[u8] = payload.into();
                             self.enqueue_event(cmd_id, payload_bytes);
                         }
-                        // ACK with u8 default, but bool for le_param_req
                         let _ = self
                             .ack_event(cmd_id, src_ctx, dst_grp, src_grp, Some(event_ack_value))
                             .await;
                     }
                     TypeField::Response => {
-                        if response_value.is_none() {
-                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                                response_value = Some(
-                                    self.decode_i32_response(payload.into())
-                                        .expect("Failed to decode i32 response"),
-                                );
-                            }
+                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                            return self.decode_i32_response(payload.into());
                         }
                     }
                     _ => {}
                 }
-            }
-
-            if let Some(val) = response_value {
-                return Ok(val);
             }
         }
 
@@ -676,19 +631,12 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 20;
-        for i in 0..retry_count {
-            if i > 0 {
-                self.transport.delay_ms(200).await;
-            }
-
+        for _ in 0..20 {
             let mut buffer = [0u8; 256];
             let recv_packet_list = match self.receive_packet(&mut buffer).await {
                 Ok(list) => list,
                 Err(_) => continue,
             };
-
-            let mut response_value: Option<i32> = None;
 
             for recv_packet in recv_packet_list.into_iter().flatten() {
                 match recv_packet.packet_type {
@@ -701,27 +649,17 @@ impl<T: AsyncTransport> RpcClient<T> {
                             let payload_bytes: &[u8] = payload.into();
                             self.enqueue_event(cmd_id, payload_bytes);
                         }
-                        // ACK with the bool value
                         let _ = self
                             .send_bool_response(src_ctx, dst_grp, src_grp, event_ack_value)
                             .await;
                     }
                     TypeField::Response => {
-                        if response_value.is_none() {
-                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                                response_value = Some(
-                                    self.decode_i32_response(payload.into())
-                                        .expect("Failed to decode i32 response"),
-                                );
-                            }
+                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                            return self.decode_i32_response(payload.into());
                         }
                     }
                     _ => {}
                 }
-            }
-
-            if let Some(val) = response_value {
-                return Ok(val);
             }
         }
 
@@ -748,19 +686,12 @@ impl<T: AsyncTransport> RpcClient<T> {
             .await
             .expect("Failed to send packet");
 
-        let retry_count = 20;
-        for i in 0..retry_count {
-            if i > 0 {
-                self.transport.delay_ms(200).await;
-            }
-
+        for _ in 0..20 {
             let mut buffer = [0u8; 256];
             let recv_packet_list = match self.receive_packet(&mut buffer).await {
                 Ok(list) => list,
                 Err(_) => continue,
             };
-
-            let mut response_value: Option<i32> = None;
 
             for recv_packet in recv_packet_list.into_iter().flatten() {
                 match recv_packet.packet_type {
@@ -773,7 +704,6 @@ impl<T: AsyncTransport> RpcClient<T> {
                             let payload_bytes: &[u8] = payload.into();
                             self.enqueue_event(cmd_id, payload_bytes);
                         }
-                        // Choose ACK type based on event's cmd_id
                         if bool_ack_cmd_id == Some(cmd_id) {
                             let _ = self
                                 .send_bool_response(src_ctx, dst_grp, src_grp, true)
@@ -789,21 +719,12 @@ impl<T: AsyncTransport> RpcClient<T> {
                         }
                     }
                     TypeField::Response => {
-                        if response_value.is_none() {
-                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                                response_value = Some(
-                                    self.decode_i32_response(payload.into())
-                                        .expect("Failed to decode i32 response"),
-                                );
-                            }
+                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                            return self.decode_i32_response(payload.into());
                         }
                     }
                     _ => {}
                 }
-            }
-
-            if let Some(val) = response_value {
-                return Ok(val);
             }
         }
 
@@ -814,17 +735,30 @@ impl<T: AsyncTransport> RpcClient<T> {
         &mut self,
         output: &'a mut [u8; 256],
     ) -> Result<[Option<ParsedNrfRpcPacket<'a>>; 5], RpcError> {
-        // Get the raw packet from the "wire"
-        let len = self
-            .transport
-            .read(output)
-            .await
-            .map_err(|_| RpcError::Transport)?;
+        // Accumulate raw bytes until at least one complete HDLC frame (opening
+        // and closing 0x7e delimiter) is present in the buffer. This guards
+        // against partial reads from the transport layer; the caller does not
+        // need to retry on partial frames.
+        let mut total = 0;
+        loop {
+            let n = self
+                .transport
+                .read(&mut output[total..])
+                .await
+                .map_err(|_| RpcError::Transport)?;
+            if n == 0 {
+                return Err(RpcError::Transport);
+            }
+            total += n;
+            if crate::uart_transport::hdlc_frame_complete(&output[..total]) {
+                break;
+            }
+        }
 
         let mut output_pkt_list: [Option<ParsedNrfRpcPacket<'a>>; 5] = [const { None }; 5];
         let mut packet_index = 0;
 
-        let mut remaining_buffer = &mut output[..len];
+        let mut remaining_buffer = &mut output[..total];
         while remaining_buffer.len() > 0 {
             let (raw_packet, next_remaining_buffer) =
                 T::RxTransportPacket::new(remaining_buffer).map_err(|_| RpcError::Transport)?;

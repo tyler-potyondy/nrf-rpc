@@ -78,7 +78,7 @@ use crate::{
     AsyncTransport,
     transport::{
         DecodedTransportPacket, EncodedTransportPacket, RpcRxTransportPacket, RpcTxTransportPacket,
-        TransportBuffer,
+        TransportBuffer, TransportError,
     },
 };
 
@@ -87,7 +87,138 @@ const ESCAPE: u8 = 0x7d;
 /// nRF RPC UART Frame Delimiter Byte.
 const DELIMITER: u8 = 0x7e;
 
-pub trait Uart: AsyncTransport {}
+/// Raw UART byte source — the primitive building block for UART transport.
+///
+/// Implement this trait for your UART hardware (e.g. an Embassy UART peripheral).
+/// Wrap the implementation in [`UartTransport`] to get HDLC frame accumulation
+/// for free; callers of [`AsyncTransport::read`] will always receive a complete,
+/// parseable HDLC frame.
+#[allow(async_fn_in_trait)]
+pub trait Uart {
+    type Error: TransportError;
+
+    /// Read raw bytes from the UART into `buf`.
+    ///
+    /// May return fewer bytes than `buf.len()` and may return `Ok(0)` when no
+    /// data is immediately available. Partial frames are fine — [`UartTransport`]
+    /// accumulates until a complete HDLC frame is present.
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+
+    /// Write raw bytes to the UART.
+    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error>;
+
+    /// Delay for the given number of milliseconds.
+    async fn delay_ms(&mut self, ms: u32);
+}
+
+/// UART transport wrapper that implements [`AsyncTransport`] on top of a [`Uart`].
+///
+/// [`UartTransport::read`] accumulates raw bytes internally until a complete HDLC
+/// frame (two `0x7E` delimiters) is present, then delivers the frame to the caller.
+/// This means every implementor of [`Uart`] automatically gets correct
+/// frame-boundary semantics without having to know anything about HDLC.
+pub struct UartTransport<Inner: Uart> {
+    inner: Inner,
+    /// Internal accumulation buffer for partial HDLC frames.
+    rx_buf: [u8; 512],
+    rx_len: usize,
+}
+
+impl<Inner: Uart> UartTransport<Inner> {
+    pub fn new(inner: Inner) -> Self {
+        Self {
+            inner,
+            rx_buf: [0u8; 512],
+            rx_len: 0,
+        }
+    }
+}
+
+impl<Inner: Uart> AsyncTransport for UartTransport<Inner> {
+    type Error = Inner::Error;
+    type TxTransportPacket<'a> = UartTxTransport<'a>;
+    type RxTransportPacket<'a> = UartRxTransport<'a>;
+
+    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+        self.inner.write(data).await
+    }
+
+    /// Accumulate raw bytes from the inner transport until a complete HDLC frame
+    /// is present, then deliver all bytes up through the closing delimiter.
+    ///
+    /// Returns `Ok(0)` when the inner transport has no data yet (or after a
+    /// timeout), so the caller can retry later. Any bytes already accumulated
+    /// are preserved across calls.
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        loop {
+            if self.rx_len > 0 && hdlc_frame_complete(&self.rx_buf[..self.rx_len]) {
+                break;
+            }
+            if self.rx_len >= self.rx_buf.len() {
+                // Internal buffer full with no complete frame — discard stale data
+                // and let the caller retry.
+                self.rx_len = 0;
+                return Ok(0);
+            }
+            let n = self.inner.read(&mut self.rx_buf[self.rx_len..]).await?;
+            if n == 0 {
+                // Inner has no data yet; preserve accumulated bytes and return 0
+                // so the caller's retry loop can yield before trying again.
+                return Ok(0);
+            }
+            self.rx_len += n;
+        }
+
+        // Find the closing delimiter of the last complete frame.
+        //
+        // Toggle between "inside frame" and "between frames" on each 0x7e.
+        // The closing 0x7e of frame N is also the opening of frame N+1 in
+        // HDLC, so we must not mark an opening delimiter as last_end.
+        // Example: [7E content 7E  7E content 7E  7E]
+        //                     ^15  ^16        ^35  ^36
+        //   • toggle at 0  → inside
+        //   • toggle at 15 → outside, last_end = 15  (frame A closed)
+        //   • toggle at 16 → inside                  (frame B opened)
+        //   • toggle at 35 → outside, last_end = 35  (frame B closed)
+        //   • toggle at 36 → inside                  (frame C opened, not yet closed)
+        // Deliver 0..=35, keep [7E] at 36 in rx_buf for next call.
+        let mut last_end = 0usize;
+        let mut found_last = false;
+        let mut inside_frame = false;
+        for (i, &byte) in self.rx_buf[..self.rx_len].iter().enumerate() {
+            if byte == DELIMITER {
+                if inside_frame {
+                    // This 7e closes the current frame.
+                    last_end = i;
+                    found_last = true;
+                    inside_frame = false;
+                } else {
+                    // This 7e opens a new frame.
+                    inside_frame = true;
+                }
+            }
+        }
+        if !found_last {
+            // hdlc_frame_complete guarantees this can't happen.
+            self.rx_len = 0;
+            return Ok(0);
+        }
+
+        let n = core::cmp::min(buf.len(), last_end + 1);
+        buf[..n].copy_from_slice(&self.rx_buf[..n]);
+
+        // Shift any remaining bytes (start of next frame) to the front.
+        let remaining = self.rx_len - n;
+        self.rx_buf.copy_within(n..self.rx_len, 0);
+        self.rx_len = remaining;
+
+        Ok(n)
+    }
+
+    async fn delay_ms(&mut self, ms: u32) {
+        self.inner.delay_ms(ms).await;
+    }
+}
 
 pub trait UartTransportBufferStatus {}
 
@@ -170,11 +301,13 @@ impl<'a> RpcRxTransportPacket<'a> for UartRxTransport<'a> {
         let mut start_ind = 0;
         let mut closing_ind = 0;
         let mut found_start = false;
+        let mut found_end = false;
 
         for (index, byte) in buffer.iter().enumerate() {
             if *byte == DELIMITER {
                 if found_start {
                     closing_ind = index;
+                    found_end = true;
                     break;
                 } else {
                     start_ind = index;
@@ -183,8 +316,8 @@ impl<'a> RpcRxTransportPacket<'a> for UartRxTransport<'a> {
             }
         }
 
-        if !found_start {
-            // No delimiter byte found, return error with original buffer.
+        if !found_start || !found_end {
+            // No complete frame (missing opening or closing delimiter); return error with original buffer.
             return Err((buffer, ()));
         }
 
@@ -408,6 +541,25 @@ impl<'a> UartTransportBuffer<'a, EncodingInProgress> {
             status: core::marker::PhantomData,
         })
     }
+}
+
+/// Returns `true` once `buf` contains both an opening and a closing `0x7e`
+/// delimiter, indicating that at least one complete HDLC frame is present.
+///
+/// Used by `RpcClient::receive_packet` to determine when enough bytes have been
+/// accumulated to attempt HDLC frame parsing. Exposed as `pub` so external
+/// transport implementations can use it as well.
+pub fn hdlc_frame_complete(buf: &[u8]) -> bool {
+    let mut found_start = false;
+    for &byte in buf {
+        if byte == DELIMITER {
+            if found_start {
+                return true;
+            }
+            found_start = true;
+        }
+    }
+    false
 }
 
 /// Calculate CRC16_CCITT with seed.
