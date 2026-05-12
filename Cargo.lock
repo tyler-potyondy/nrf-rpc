@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "babble-bridge"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "959eea2e8b897f7edda04da4b968a1c7be506de46bb63feac551bedda1b4573c"
+checksum = "f645b75cdc05701f04917c8a5c40702109fbe5b21c3c3bb27a778bd0bb73956c"
 
 [[package]]
 name = "bitflags"
