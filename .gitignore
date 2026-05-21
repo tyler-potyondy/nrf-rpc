@@ -1,4 +1,5 @@
 /target
+/external
 /nrf
 DESIGN.md
 tests/raw_rpc

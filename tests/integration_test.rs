@@ -16,7 +16,7 @@ use nrf_rpc::ble::{
     BtGattDiscoverType, BtGattSubscribeParams, BtLeConnParam, BtLeScanParam, GattDiscoverResult,
     ScanResultData,
 };
-use babble_bridge::{TestProcesses, spawn_zephyr_rpc_server_with_socat};
+use babble_bridge::{LogOutput, TestProcesses, spawn_zephyr_rpc_server_with_socat};
 use nrf_rpc::{RpcClient, TransportError, ble::Ble, uart_transport::{Uart, UartTransport}};
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -240,7 +240,7 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
         .collect()
 }
 
-const TEST_DIRECTORY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
+const TEST_DIRECTORY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sockets");
 const BSIM_BIN_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/external/tools/bsim/bin");
 
 /// One-shot environment precondition check. Runs the first time any test
@@ -311,7 +311,7 @@ type MockTransport = UartTransport<MockUart>;
 fn run_zephyr_rpc_server_exe(test_name: &str) -> (TestProcesses, MockTransport) {
     preflight_check();
     let tests_dir = Path::new(TEST_DIRECTORY_PATH);
-    let (processes, socket_path) = spawn_zephyr_rpc_server_with_socat(tests_dir, test_name);
+    let (processes, socket_path) = spawn_zephyr_rpc_server_with_socat(tests_dir, test_name, LogOutput::Off);
     let socket_path_str = socket_path
         .to_str()
         .expect("socket path must be valid UTF-8");

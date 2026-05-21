@@ -2,7 +2,7 @@
 members = [".", "nrf-rpc-codegen", "xtask"]
 
 [workspace.dependencies]
-babble-bridge = "0.1.2"
+babble-bridge = "0.1.3"
 
 [package]
 name = "nrf-rpc"
