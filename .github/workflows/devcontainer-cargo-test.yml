@@ -121,26 +121,22 @@ jobs:
       - name: Chown workspace to container UID 1000
         run: sudo chown -R 1000:1000 "$GITHUB_WORKSPACE"
 
-      - name: cargo xtask zephyr-setup --build-from-source && cargo test
+      - name: cargo xtask docker-run zephyr-setup + tests
+        env:
+          # This host-side `cargo xtask ...` invocation runs after the workspace
+          # is chowned for the container user. Keep host artifacts in /tmp so
+          # host Cargo does not need to write under $GITHUB_WORKSPACE/target.
+          CARGO_TARGET_DIR: /tmp/cargo-target-host
         run: |
-          docker run --rm \
-            --platform linux/amd64 \
-            --memory=6g \
-            --memory-swap=14g \
-            -v "$GITHUB_WORKSPACE:/workspace" \
-            -w /workspace \
-            -e CARGO_HOME=/tmp/cargo \
-            -e CARGO_TARGET_DIR=/tmp/target \
-            nrf-sim-bridge:latest \
-            bash -lc '
-              set -euo pipefail
-              echo "=== cargo xtask zephyr-setup --build-from-source ==="
-              cargo xtask zephyr-setup --build-from-source
-              echo "=== cargo test --workspace --lib ==="
-              cargo test --workspace --lib
-              echo "=== cargo test --test integration_test ==="
-              cargo test --test integration_test -- --test-threads=1
-            '
+          cargo xtask docker-run -- bash -lc '
+            set -euo pipefail
+            echo "=== cargo xtask zephyr-setup --build-from-source ==="
+            cargo xtask zephyr-setup --build-from-source
+            echo "=== cargo test --workspace --lib ==="
+            cargo test --workspace --lib
+            echo "=== cargo test --test integration_test ==="
+            cargo test --test integration_test -- --test-threads=1
+          '
 
       - name: Restore workspace permissions for runner
         if: always()
