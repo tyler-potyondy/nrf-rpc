@@ -541,6 +541,7 @@ impl<T: AsyncTransport> RpcClient<T> {
                 Err(_) => continue,
             };
 
+            let mut i32_result: Option<Result<i32, RpcError>> = None;
             for recv_packet in recv_packet_list.into_iter().flatten() {
                 match recv_packet.packet_type {
                     TypeField::Command => {
@@ -555,12 +556,17 @@ impl<T: AsyncTransport> RpcClient<T> {
                         let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
                     }
                     TypeField::Response => {
-                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                            return self.decode_i32_response(payload.into());
+                        if i32_result.is_none() {
+                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                                i32_result = Some(self.decode_i32_response(payload.into()));
+                            }
                         }
                     }
                     _ => {}
                 }
+            }
+            if let Some(result) = i32_result {
+                return result;
             }
         }
 
@@ -589,6 +595,7 @@ impl<T: AsyncTransport> RpcClient<T> {
                 Err(_) => continue,
             };
 
+            let mut i32_result: Option<Result<i32, RpcError>> = None;
             for recv_packet in recv_packet_list.into_iter().flatten() {
                 match recv_packet.packet_type {
                     TypeField::Command => {
@@ -605,12 +612,17 @@ impl<T: AsyncTransport> RpcClient<T> {
                             .await;
                     }
                     TypeField::Response => {
-                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                            return self.decode_i32_response(payload.into());
+                        if i32_result.is_none() {
+                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                                i32_result = Some(self.decode_i32_response(payload.into()));
+                            }
                         }
                     }
                     _ => {}
                 }
+            }
+            if let Some(result) = i32_result {
+                return result;
             }
         }
 
@@ -638,6 +650,7 @@ impl<T: AsyncTransport> RpcClient<T> {
                 Err(_) => continue,
             };
 
+            let mut i32_result: Option<Result<i32, RpcError>> = None;
             for recv_packet in recv_packet_list.into_iter().flatten() {
                 match recv_packet.packet_type {
                     TypeField::Command => {
@@ -654,12 +667,17 @@ impl<T: AsyncTransport> RpcClient<T> {
                             .await;
                     }
                     TypeField::Response => {
-                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                            return self.decode_i32_response(payload.into());
+                        if i32_result.is_none() {
+                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                                i32_result = Some(self.decode_i32_response(payload.into()));
+                            }
                         }
                     }
                     _ => {}
                 }
+            }
+            if let Some(result) = i32_result {
+                return result;
             }
         }
 
@@ -693,6 +711,7 @@ impl<T: AsyncTransport> RpcClient<T> {
                 Err(_) => continue,
             };
 
+            let mut i32_result: Option<Result<i32, RpcError>> = None;
             for recv_packet in recv_packet_list.into_iter().flatten() {
                 match recv_packet.packet_type {
                     TypeField::Command => {
@@ -719,12 +738,17 @@ impl<T: AsyncTransport> RpcClient<T> {
                         }
                     }
                     TypeField::Response => {
-                        if let ParsedPayload::Cbor(payload) = recv_packet.payload {
-                            return self.decode_i32_response(payload.into());
+                        if i32_result.is_none() {
+                            if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                                i32_result = Some(self.decode_i32_response(payload.into()));
+                            }
                         }
                     }
                     _ => {}
                 }
+            }
+            if let Some(result) = i32_result {
+                return result;
             }
         }
 
@@ -927,10 +951,240 @@ mod tests {
     use super::*;
     extern crate alloc;
     use alloc::format;
+    use alloc::vec::Vec;
 
     #[test]
     fn test_rpc_error_display() {
         let err = RpcError::Transport;
         assert_eq!(format!("{}", err), "Transport error");
+    }
+
+    // ── helpers shared by the batched-packet bug tests ────────────────────────
+
+    #[derive(Debug)]
+    struct InternalMockError;
+    impl core::fmt::Display for InternalMockError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "internal mock error")
+        }
+    }
+    impl crate::TransportError for InternalMockError {}
+
+    fn crc16_ccitt_internal(data: &[u8]) -> u16 {
+        let mut crc: u16 = 0xFFFF;
+        for &byte in data {
+            let mut b = byte;
+            for _ in 0..8 {
+                if (crc ^ b as u16) & 0x0001 != 0 {
+                    crc = (crc >> 1) ^ 0x8408;
+                } else {
+                    crc >>= 1;
+                }
+                b >>= 1;
+            }
+        }
+        crc
+    }
+
+    fn make_hdlc_frame_internal(raw: &[u8]) -> Vec<u8> {
+        let crc = crc16_ccitt_internal(raw);
+        let mut out = alloc::vec![0x7Eu8];
+        let mut push_escaped = |out: &mut Vec<u8>, b: u8| {
+            if b == 0x7E || b == 0x7D {
+                out.push(0x7D);
+                out.push(b ^ 0x20);
+            } else {
+                out.push(b);
+            }
+        };
+        for &b in raw {
+            push_escaped(&mut out, b);
+        }
+        for &c in &crc.to_le_bytes() {
+            push_escaped(&mut out, c);
+        }
+        out.push(0x7E);
+        out
+    }
+
+    fn make_i32_response_frame_internal(value: i32) -> Vec<u8> {
+        assert!((0..=23).contains(&value));
+        let raw = [0x01u8, 0xFF, 0x00, 0x00, 0x00, value as u8];
+        make_hdlc_frame_internal(&raw)
+    }
+
+    fn make_command_event_frame_internal(
+        src_ctx: u8, cmd_id: u8, dst_ctx: u8, src_grp: u8, dst_grp: u8,
+    ) -> Vec<u8> {
+        let raw = [0x80 | src_ctx, cmd_id, dst_ctx, src_grp, dst_grp, 0xF6u8];
+        make_hdlc_frame_internal(&raw)
+    }
+
+    fn write_buffer_contains_response_ack_internal(buf: &[u8]) -> bool {
+        buf.windows(2).any(|w| w[0] == 0x7E && w[1] == 0x01)
+    }
+
+    /// Mock inner UART used directly inside the crate's own test module so
+    /// that `pub(crate)` methods on `RpcClient` are accessible.
+    struct InternalOneShotUart {
+        skip_reads: usize,
+        read_count: usize,
+        read_data: Vec<u8>,
+        read_pos: usize,
+        writes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl InternalOneShotUart {
+        fn new(
+            skip_reads: usize,
+            read_data: Vec<u8>,
+        ) -> (Self, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+            let writes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let uart = Self {
+                skip_reads,
+                read_count: 0,
+                read_data,
+                read_pos: 0,
+                writes: std::sync::Arc::clone(&writes),
+            };
+            (uart, writes)
+        }
+    }
+
+    impl crate::uart_transport::Uart for InternalOneShotUart {
+        type Error = InternalMockError;
+
+        async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+            self.writes.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            self.read_count += 1;
+            if self.read_count <= self.skip_reads {
+                return Ok(0);
+            }
+            if self.read_pos >= self.read_data.len() {
+                return Ok(0);
+            }
+            let n = core::cmp::min(buf.len(), self.read_data.len() - self.read_pos);
+            buf[..n].copy_from_slice(&self.read_data[self.read_pos..self.read_pos + n]);
+            self.read_pos += n;
+            Ok(n)
+        }
+
+        async fn delay_ms(&mut self, _ms: u32) {}
+    }
+
+    // ── `send_command_and_get_i32_ack_events_bool` ───────────────────────────
+
+    /// **`send_command_and_get_i32_ack_events_bool`** — batched Command after
+    /// Response is dropped by the early return.
+    ///
+    /// This variant is not exposed through any public `Ble` method, so it is
+    /// tested here where `pub(crate)` access is available.
+    ///
+    /// *Observable*: No bool-Response ACK frame written to the transport.
+    ///
+    /// Fails with unfixed code; passes after the deferred-`i32_result` fix.
+    #[test]
+    fn test_send_command_and_get_i32_ack_events_bool_drops_batched_command_event() {
+        use embassy_futures::block_on;
+
+        let mut read_data = make_i32_response_frame_internal(0);
+        read_data.extend(make_command_event_frame_internal(0, 55, 0, 0, 0));
+
+        let (uart, writes) = InternalOneShotUart::new(0, read_data);
+        let mut client = RpcClient::new(crate::uart_transport::UartTransport::new(uart));
+
+        // Build a minimal Command packet with empty CBOR payload.
+        let mut cbor_buf = [0u8; 8];
+        let payload = crate::cbor_encoding::CborPayloadBuilder::new(&mut cbor_buf)
+            .build()
+            .expect("CBOR build");
+
+        let packet = packet::NrfRpcPacket::<packet::Command>::new(
+            packet::SrcContextId::try_from(0).unwrap(),
+            packet::DestContextId::try_from(0xFF).unwrap(),
+            packet::CommandId::try_from(0x01).unwrap(),
+            packet::SrcGroupId::try_from(0).unwrap(),
+            packet::DstGroupId::try_from(0).unwrap(),
+            payload,
+        );
+
+        let result =
+            block_on(client.send_command_and_get_i32_ack_events_bool(packet, true));
+
+        assert!(
+            result.is_ok(),
+            "must return Ok(0) when response carries i32=0; got: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap(), 0);
+
+        let written = writes.lock().unwrap().clone();
+        assert!(
+            write_buffer_contains_response_ack_internal(&written),
+            "A bool-Response ACK (0x7E 0x01 …) must be written for the batched Command.\n\
+             Bug: early return in send_command_and_get_i32_ack_events_bool drops it.\n\
+             Written bytes: {:02X?}",
+            written
+        );
+    }
+
+    // ── `send_command_and_get_i32_smart_ack` ─────────────────────────────────
+
+    /// **`send_command_and_get_i32_smart_ack`** — same early-return bug.
+    ///
+    /// Tested directly here since this variant has no public `Ble` wrapper.
+    ///
+    /// *Observable*: No Response ACK frame written to the transport.
+    ///
+    /// Fails with unfixed code; passes after the deferred-`i32_result` fix.
+    #[test]
+    fn test_send_command_and_get_i32_smart_ack_drops_batched_command_event() {
+        use embassy_futures::block_on;
+
+        let mut read_data = make_i32_response_frame_internal(0);
+        read_data.extend(make_command_event_frame_internal(0, 77, 0, 0, 0));
+
+        let (uart, writes) = InternalOneShotUart::new(0, read_data);
+        let mut client = RpcClient::new(crate::uart_transport::UartTransport::new(uart));
+
+        let mut cbor_buf = [0u8; 8];
+        let payload = crate::cbor_encoding::CborPayloadBuilder::new(&mut cbor_buf)
+            .build()
+            .expect("CBOR build");
+
+        let packet = packet::NrfRpcPacket::<packet::Command>::new(
+            packet::SrcContextId::try_from(0).unwrap(),
+            packet::DestContextId::try_from(0xFF).unwrap(),
+            packet::CommandId::try_from(0x02).unwrap(),
+            packet::SrcGroupId::try_from(0).unwrap(),
+            packet::DstGroupId::try_from(0).unwrap(),
+            payload,
+        );
+
+        let result = block_on(client.send_command_and_get_i32_smart_ack(
+            packet,
+            Some(0), // default_ack_u8
+            None,    // bool_ack_cmd_id
+        ));
+
+        assert!(
+            result.is_ok(),
+            "must return Ok(0) when response carries i32=0; got: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap(), 0);
+
+        let written = writes.lock().unwrap().clone();
+        assert!(
+            write_buffer_contains_response_ack_internal(&written),
+            "A Response ACK (0x7E 0x01 …) must be written for the batched Command.\n\
+             Bug: early return in send_command_and_get_i32_smart_ack drops it.\n\
+             Written bytes: {:02X?}",
+            written
+        );
     }
 }
