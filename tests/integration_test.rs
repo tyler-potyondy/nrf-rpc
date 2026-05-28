@@ -12,9 +12,9 @@ use nrf_rpc::ble::cgm::{
     CgmMeasurement, encode_uuid_16,
 };
 use nrf_rpc::ble::{
-    BT_GATT_CCC_NOTIFY, BT_LE_SCAN_TYPE_ACTIVE, BtConnLeCreateParam, BtGattDiscoverParams,
-    BtGattDiscoverType, BtGattSubscribeParams, BtLeConnParam, BtLeScanParam, GattDiscoverResult,
-    ScanResultData,
+    BleEvent, BT_GATT_CCC_NOTIFY, BT_LE_SCAN_TYPE_ACTIVE, BtConnLeCreateParam,
+    BtGattDiscoverParams, BtGattDiscoverType, BtGattSubscribeParams, BtLeConnParam, BtLeScanParam,
+    GattDiscoverResult, ScanResultData,
 };
 use babble_bridge::{LogOutput, TestProcesses, spawn_zephyr_rpc_server_with_socat};
 use nrf_rpc::{RpcClient, TransportError, ble::Ble, uart_transport::{Uart, UartTransport}};
@@ -742,7 +742,16 @@ fn test_cgm_full_central_flow_inner() {
     let max_scan_results = 50;
 
     for i in 0..max_scan_results {
-        let result = embassy_futures::block_on(ble.wait_for_scan_result());
+        let result = embassy_futures::block_on(async {
+            loop {
+                match ble.next_event().await {
+                    Ok(BleEvent::ScanResult(s)) => return Ok(s),
+                    Ok(BleEvent::ScanTimeout) => return Err(nrf_rpc::ble::BleError::RpcError),
+                    Ok(_) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        });
         match result {
             Ok(scan) => {
                 let name = scan.device_name().unwrap_or("<unknown>");
@@ -809,7 +818,16 @@ fn test_cgm_full_central_flow_inner() {
     // Step 6: Wait for the "connected" callback event
     // ------------------------------------------------------------------
     println!("[Step 6] Waiting for connection event...");
-    let conn_event = embassy_futures::block_on(ble.wait_for_connection());
+    let conn_event = embassy_futures::block_on(async {
+        for _ in 0..20 {
+            match ble.next_event().await {
+                Ok(BleEvent::Connected(e)) => return Ok(e),
+                Ok(_) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(nrf_rpc::ble::BleError::RpcError)
+    });
     assert!(
         conn_event.is_ok(),
         "Did not receive connection event: {:?}",
@@ -846,7 +864,22 @@ fn test_cgm_full_central_flow_inner() {
 
     // Wait for the SMP exchange to complete (passkey exchange + security level 4)
     println!("[Step 6a] Waiting for security level 4...");
-    let result = embassy_futures::block_on(ble.wait_for_security_level(4));
+    let result = embassy_futures::block_on(async {
+        for _ in 0..30 {
+            match ble.next_event().await {
+                Ok(BleEvent::SecurityChanged { level, err: 0 }) if level >= 4 => return Ok(level),
+                Ok(BleEvent::PasskeyConfirm(_)) => {
+                    let _ = ble.bt_conn_auth_passkey_confirm().await;
+                }
+                Ok(BleEvent::PairingConfirm) => {
+                    let _ = ble.bt_conn_auth_pairing_confirm().await;
+                }
+                Ok(_) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(nrf_rpc::ble::BleError::RpcError)
+    });
     assert!(
         result.is_ok(),
         "Failed to achieve security level 4: {:?}",
@@ -884,7 +917,15 @@ fn test_cgm_full_central_flow_inner() {
     let mut cgm_service_end_handle: Option<u16> = None;
 
     for i in 0..20 {
-        let result = embassy_futures::block_on(ble.wait_for_gatt_discover_result());
+        let result = embassy_futures::block_on(async {
+            loop {
+                match ble.next_event().await {
+                    Ok(BleEvent::GattDiscovery(r)) => return Ok(r),
+                    Ok(_) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        });
         match result {
             Ok(GattDiscoverResult::Service {
                 handle,
@@ -951,7 +992,15 @@ fn test_cgm_full_central_flow_inner() {
     let mut cgm_meas_value_handle: Option<u16> = None;
 
     for i in 0..20 {
-        let result = embassy_futures::block_on(ble.wait_for_gatt_discover_result());
+        let result = embassy_futures::block_on(async {
+            loop {
+                match ble.next_event().await {
+                    Ok(BleEvent::GattDiscovery(r)) => return Ok(r),
+                    Ok(_) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        });
         match result {
             Ok(GattDiscoverResult::Characteristic {
                 handle,
@@ -1017,7 +1066,15 @@ fn test_cgm_full_central_flow_inner() {
     let mut ccc_handle: Option<u16> = None;
 
     for i in 0..20 {
-        let result = embassy_futures::block_on(ble.wait_for_gatt_discover_result());
+        let result = embassy_futures::block_on(async {
+            loop {
+                match ble.next_event().await {
+                    Ok(BleEvent::GattDiscovery(r)) => return Ok(r),
+                    Ok(_) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        });
         match result {
             Ok(GattDiscoverResult::Descriptor { handle, uuid_16 }) => {
                 println!("  Desc #{}: UUID=0x{:04X} handle={}", i, uuid_16, handle);
@@ -1085,7 +1142,15 @@ fn test_cgm_full_central_flow_inner() {
     let max_notification_attempts = 30;
 
     for attempt in 0..max_notification_attempts {
-        let result = embassy_futures::block_on(ble.wait_for_gatt_notification());
+        let result = embassy_futures::block_on(async {
+            loop {
+                match ble.next_event().await {
+                    Ok(BleEvent::GattNotification(n)) => return Ok(n),
+                    Ok(_) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        });
         match result {
             Ok(notif) => {
                 println!(

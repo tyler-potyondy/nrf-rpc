@@ -35,7 +35,7 @@ use crate::cbor_encoding::{CborError, CborPayloadBuilder};
 use crate::packet::{
     self, CommandId, DestContextId, DstGroupId, NrfRpcPacket, SrcContextId, SrcGroupId,
 };
-use crate::{AsyncTransport, RpcClient, RpcError};
+use crate::{AckType, AsyncTransport, RpcClient, RpcError, RpcEventDecoder};
 
 const BT_RPC_GROUP_ID: u8 = 0x0;
 const RPC_UTILS_GROUP_ID: u8 = 0x1;
@@ -244,6 +244,12 @@ pub enum BleError {
     RpcError,
     /// Local argument or encoding issue before sending a command.
     InvalidParameter,
+}
+
+impl From<RpcError> for BleError {
+    fn from(_: RpcError) -> Self {
+        BleError::RpcError
+    }
 }
 
 impl<T: AsyncTransport> Ble<T> {
@@ -1023,165 +1029,6 @@ impl<T: AsyncTransport> Ble<T> {
         Ok(status)
     }
 
-    /// Wait for a passkey confirm event and automatically confirm it.
-    ///
-    /// After connecting to a peripheral that requires Secure Connections
-    /// pairing, the server will send a `BtRpcAuthCbPasskeyConfirmRpcCmd`
-    /// event with the passkey. This method waits for that event, ACKs it,
-    /// then calls `bt_conn_auth_passkey_confirm` to complete pairing.
-    ///
-    /// Also handles the `pairing_confirm` event that precedes passkey_confirm
-    /// in Numeric Comparison flows, and recognises `security_changed` (err=0)
-    /// as an indication that pairing completed via Just Works.
-    ///
-    /// Expected event sequence for SC Numeric Comparison:
-    ///   1. `BtRpcAuthCbPairingConfirmRpcCmd` → we reply with `bt_conn_auth_pairing_confirm`
-    ///   2. `BtRpcAuthCbPasskeyConfirmRpcCmd` (contains passkey) → we reply with `bt_conn_auth_passkey_confirm`
-    ///   3. `BtConnCbSecurityChangedCallRpcCmd` (level, err=0) → pairing done
-    ///
-    /// Other events (le_param_updated, etc.) are consumed and skipped.
-    pub async fn wait_for_passkey_confirm_and_accept(&mut self) -> Result<u32, BleError> {
-        #[cfg(test)]
-        extern crate std;
-
-        let timeout_retries = 30; // generous — pairing involves several round-trips
-        let mut passkey_value: Option<u32> = None;
-
-        for _i in 0..timeout_retries {
-            let mut event_buf = [0u8; 256];
-            let (cmd_id, payload_len) = match self.client.receive_server_event(&mut event_buf).await
-            {
-                Ok(result) => result,
-                Err(_) => continue,
-            };
-
-            #[cfg(test)]
-            std::println!(
-                "  [pairing] event cmd_id=0x{:02X}, payload_len={}, raw={:02X?}",
-                cmd_id,
-                payload_len,
-                &event_buf[..payload_len],
-            );
-
-            // ---- pairing_confirm ("Do you want to pair?") ----
-            if cmd_id == BleHostCommandId::BtRpcAuthCbPairingConfirmRpcCmd as u8 {
-                #[cfg(test)]
-                std::println!("  [pairing] Got pairing_confirm — accepting.");
-                let result = self.bt_conn_auth_pairing_confirm().await?;
-                #[cfg(test)]
-                std::println!("  [pairing] bt_conn_auth_pairing_confirm returned {}.", result);
-                if result != 0 {
-                    return Err(BleError::RpcError);
-                }
-                continue; // next: passkey_confirm
-            }
-
-            // ---- passkey_confirm (numeric comparison) ----
-            if cmd_id == BleHostCommandId::BtRpcAuthCbPasskeyConfirmRpcCmd as u8 {
-                let payload = &event_buf[..payload_len];
-                let mut d = minicbor::decode::Decoder::new(payload);
-                let passkey = d.u32().unwrap_or(0);
-
-                #[cfg(test)]
-                std::println!("  [pairing] Got passkey_confirm: passkey={} — confirming.", passkey);
-
-                let result = self.bt_conn_auth_passkey_confirm().await?;
-                #[cfg(test)]
-                std::println!("  [pairing] bt_conn_auth_passkey_confirm returned {}.", result);
-                if result != 0 {
-                    return Err(BleError::RpcError);
-                }
-                passkey_value = Some(passkey);
-                // After confirming, wait for security_changed to know pairing succeeded.
-                continue;
-            }
-
-            // ---- security_changed ----
-            if cmd_id == BleHostCommandId::BtConnCbSecurityChangedCallRpcCmd as u8 {
-                let payload = &event_buf[..payload_len];
-                let mut d = minicbor::decode::Decoder::new(payload);
-                let level = d.u8().unwrap_or(0);
-                let err = d.u8().unwrap_or(0xFF);
-
-                #[cfg(test)]
-                std::println!("  [pairing] Got security_changed: level={}, err={}", level, err);
-
-                if err == 0 {
-                    return Ok(passkey_value.unwrap_or(0));
-                }
-                // err != 0 with no passkey yet: pairing attempt failed, keep looping
-                // (the real passkey_confirm may still arrive on a retry)
-                if passkey_value.is_some() {
-                    // We already confirmed passkey but got an error — fatal
-                    return Err(BleError::RpcError);
-                }
-                continue;
-            }
-
-            // ---- any other event: consume and keep looping ----
-            #[cfg(test)]
-            std::println!("  [pairing] Ignoring unrelated event 0x{:02X}", cmd_id);
-        }
-
-        Err(BleError::RpcError)
-    }
-
-    /// Wait until the connection security level reaches at least `target_level`.
-    ///
-    /// Consumes server events (ACKing them properly, including auto-confirm
-    /// for passkey exchange) until a `BtConnCbSecurityChangedCallRpcCmd`
-    /// arrives with `err == 0` and `level >= target_level`.
-    ///
-    /// This is used after `bt_conn_set_security(4)` to wait for the SMP
-    /// Numeric Comparison passkey exchange to complete.
-    pub async fn wait_for_security_level(&mut self, target_level: u8) -> Result<u8, BleError> {
-        #[cfg(test)]
-        extern crate std;
-
-        let timeout_retries = 30;
-        for _i in 0..timeout_retries {
-            let mut event_buf = [0u8; 256];
-            let (cmd_id, payload_len) = match self.client.receive_server_event(&mut event_buf).await
-            {
-                Ok(result) => result,
-                Err(_) => continue,
-            };
-
-            #[cfg(test)]
-            std::println!(
-                "  [wait_for_security] got event cmd_id=0x{:02X} (expect 0x{:02X}), payload_len={}",
-                cmd_id,
-                BleHostCommandId::BtConnCbSecurityChangedCallRpcCmd as u8,
-                payload_len,
-            );
-
-            if cmd_id == BleHostCommandId::BtConnCbSecurityChangedCallRpcCmd as u8 {
-                let payload = &event_buf[..payload_len];
-                let mut d = minicbor::decode::Decoder::new(payload);
-                let level = d.u8().unwrap_or(0);
-                let err = d.u8().unwrap_or(0xFF);
-
-                #[cfg(test)]
-                std::println!(
-                    "  [wait_for_security] security_changed: level={}, err={}",
-                    level, err,
-                );
-
-                if err == 0 && level >= target_level {
-                    return Ok(level);
-                }
-                // err != 0 or level too low — keep waiting (SMP might still be in progress)
-                continue;
-            }
-
-            // Other events consumed and discarded (auto-confirm handles passkey inline)
-            #[cfg(test)]
-            std::println!("  [wait_for_security] consumed non-security event 0x{:02X}", cmd_id);
-        }
-
-        Err(BleError::RpcError)
-    }
-
     // ========================================================================
     // Connection creation
     // ========================================================================
@@ -1264,366 +1111,61 @@ impl<T: AsyncTransport> Ble<T> {
     }
 
     // ========================================================================
-    // Event waiting methods
+    // Event dispatch
     // ========================================================================
 
-    /// Wait for and decode a scan result event from the server.
+    /// Receive and decode the next server-initiated BLE event.
     ///
-    /// Blocks until a `BtLeScanCbRecvRpcCmd` Command arrives from the server.
-    /// Other event types are ACKed and skipped. Returns the decoded scan result.
-    pub async fn wait_for_scan_result(&mut self) -> Result<ScanResultData, BleError> {
-        // Each attempt may block for the transport read timeout (~5s).
-        // 10 retries → ~50s max wait.
-        let timeout_retries = 10;
-        for _i in 0..timeout_retries {
-            let mut event_buf = [0u8; 256];
-            let (cmd_id, payload_len) = match self.client.receive_server_event(&mut event_buf).await
-            {
-                Ok(result) => result,
-                Err(_) => continue,
-            };
-
-            #[cfg(test)]
-            extern crate std;
-            #[cfg(test)]
-            std::println!(
-                "  [wait_for_scan_result] got event cmd_id={} (expect {}), payload_len={}",
-                cmd_id,
-                BleHostCommandId::BtLeScanCbRecvRpcCmd as u8,
-                payload_len,
-            );
-
-            if cmd_id == BleHostCommandId::BtLeScanCbRecvRpcCmd as u8 {
-                let payload = &event_buf[..payload_len];
-                return Self::decode_scan_result(payload);
-            }
-            // Not the event we're looking for — it was already ACKed, keep waiting.
-        }
-
-        Err(BleError::RpcError)
+    /// Reads one event from the transport (or the internal queue), sends the
+    /// correct protocol ACK, and returns the decoded [`BleEvent`].
+    ///
+    /// The caller drives all event handling:
+    /// ```ignore
+    /// loop {
+    ///     match ble.next_event().await? {
+    ///         BleEvent::ScanResult(r) => { /* … */ }
+    ///         BleEvent::Connected(e)  => { /* … */ }
+    ///         BleEvent::GattNotification(n) => { /* … */ }
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// To loop automatically until a specific variant, use [`Ble::wait_for`].
+    pub async fn next_event(&mut self) -> Result<BleEvent, BleError> {
+        self.client.next_event::<BleDecoder>().await
     }
 
-    /// Wait for a connection event from the server.
+    /// Wait for the first event for which `f` returns `Some(R)`.
     ///
-    /// Blocks until a `BtConnCbConnectedCallRpcCmd` Command arrives. Other
-    /// events (e.g., scan results still flowing) are ACKed and skipped.
-    pub async fn wait_for_connection(&mut self) -> Result<ConnectionEvent, BleError> {
-        // Each attempt may block for the transport read timeout (~5s).
-        // 10 retries → ~50s max wait.
-        let timeout_retries = 10;
-        for _i in 0..timeout_retries {
-            let mut event_buf = [0u8; 256];
-            let (cmd_id, payload_len) = match self.client.receive_server_event(&mut event_buf).await
-            {
-                Ok(result) => result,
-                Err(_) => continue,
-            };
-
-            #[cfg(test)]
-            extern crate std;
-            #[cfg(test)]
-            std::println!(
-                "  [wait_for_connection] got event cmd_id={} (expect {}), payload_len={}",
-                cmd_id,
-                BleHostCommandId::BtConnCbConnectedCallRpcCmd as u8,
-                payload_len,
-            );
-
-            if cmd_id == BleHostCommandId::BtConnCbConnectedCallRpcCmd as u8 {
-                let payload = &event_buf[..payload_len];
-                let mut decoder = minicbor::decode::Decoder::new(payload);
-                // With CONFIG_BT_MAX_CONN=1, bt_rpc_encode_bt_conn encodes
-                // nothing (conn index is implicit). Only the err field is present.
-                let err = decoder.u8().map_err(|_| BleError::RpcError)?;
-                return Ok(ConnectionEvent { err });
-            }
-            // Not a connection event — already ACKed, continue waiting.
-        }
-
-        Err(BleError::RpcError)
-    }
-
-    // ========================================================================
-    // GATT Discovery event waiting
-    // ========================================================================
-
-    /// Wait for and decode a single GATT discovery callback event from the server.
+    /// Calls [`next_event`](Ble::next_event) in a loop, passing each event to
+    /// `f`. Events for which `f` returns `None` are silently discarded.
+    /// Returns as soon as `f` returns `Some`.
     ///
-    /// The server sends `BtGattDiscoverCallbackRpcCmd` for each discovered
-    /// attribute, and a final one with attr=NULL to signal completion.
+    /// # Example
     ///
-    /// This method responds with `BT_GATT_ITER_CONTINUE` so the server keeps
-    /// iterating. Call repeatedly until `GattDiscoverResult::Complete` is returned.
-    pub async fn wait_for_gatt_discover_result(
-        &mut self,
-    ) -> Result<GattDiscoverResult, BleError> {
-        let timeout_retries = 20;
-        for _i in 0..timeout_retries {
-            let mut event_buf = [0u8; 256];
-            let (cmd_id, payload_len) = match self
-                .client
-                .receive_server_event_with_u8_response(
-                    &mut event_buf,
-                    BT_GATT_ITER_CONTINUE,
-                )
-                .await
-            {
-                Ok(result) => result,
-                Err(_) => continue,
-            };
-
-            #[cfg(test)]
-            extern crate std;
-            #[cfg(test)]
-            std::println!(
-                "  [wait_for_gatt_discover] got event cmd_id={} (expect {}), payload_len={}",
-                cmd_id,
-                BleHostCommandId::BtGattDiscoverCallbackRpcCmd as u8,
-                payload_len,
-            );
-
-            if cmd_id == BleHostCommandId::BtGattDiscoverCallbackRpcCmd as u8 {
-                let payload = &event_buf[..payload_len];
-                return Self::decode_discover_callback(payload);
-            }
-            // Not the event we need — keep waiting.
-        }
-
-        Err(BleError::RpcError)
-    }
-
-    /// Wait for and decode a GATT notification event from the server.
+    /// ```ignore
+    /// // Wait for the first scan result whose name contains "CGM".
+    /// let scan = ble.wait_for(|e| match e {
+    ///     BleEvent::ScanResult(s) if s.device_name().unwrap_or("").contains("CGM") => Some(s),
+    ///     _ => None,
+    /// }).await?;
     ///
-    /// The server sends `BtGattSubscribeParamsNotifyRpcCmd` each time a
-    /// notification is received from the peripheral.
-    ///
-    /// Responds with `BT_GATT_ITER_CONTINUE` so the server keeps forwarding.
-    pub async fn wait_for_gatt_notification(
-        &mut self,
-    ) -> Result<GattNotificationData, BleError> {
-        let timeout_retries = 20;
-        for _i in 0..timeout_retries {
-            let mut event_buf = [0u8; 256];
-            let (cmd_id, payload_len) = match self
-                .client
-                .receive_server_event_with_u8_response(
-                    &mut event_buf,
-                    BT_GATT_ITER_CONTINUE,
-                )
-                .await
-            {
-                Ok(result) => result,
-                Err(_) => continue,
-            };
-
-            #[cfg(test)]
-            extern crate std;
-            #[cfg(test)]
-            std::println!(
-                "  [wait_for_gatt_notification] got event cmd_id={} (expect {}), payload_len={}",
-                cmd_id,
-                BleHostCommandId::BtGattSubscribeParamsNotifyRpcCmd as u8,
-                payload_len,
-            );
-
-            if cmd_id == BleHostCommandId::BtGattSubscribeParamsNotifyRpcCmd as u8 {
-                let payload = &event_buf[..payload_len];
-                return Self::decode_notification(payload);
-            }
-            // Not the event we need — keep waiting.
-        }
-
-        Err(BleError::RpcError)
-    }
-
-    // ========================================================================
-    // Internal event decoders
-    // ========================================================================
-
-    /// Decode a GATT discovery callback from raw CBOR payload.
-    ///
-    /// Wire format (CONFIG_BT_MAX_CONN=1, so no conn encoded):
-    ///   params_ptr(uint),
-    ///   then either:
-    ///     null            → discovery complete
-    ///     OR:
-    ///       uuid(bstr)    → attribute UUID
-    ///       handle(uint)  → attribute handle
-    ///       user_data:
-    ///         null                                → no user_data
-    ///         OR for primary/secondary service:
-    ///           service_uuid(bstr), end_handle(uint)
-    ///         OR for characteristic:
-    ///           char_uuid(bstr), value_handle(uint), properties(uint)
-    fn decode_discover_callback(payload: &[u8]) -> Result<GattDiscoverResult, BleError> {
-        let mut d = minicbor::decode::Decoder::new(payload);
-
-        // params_ptr — we don't need it currently, but must consume it.
-        let _params_ptr = d.u64().map_err(|_| BleError::RpcError)?;
-
-        // Check for null (discovery complete).
-        // Use datatype() to peek without consuming, because d.null() advances
-        // the decoder position even on failure.
-        if d.datatype().map_err(|_| BleError::RpcError)? == minicbor::data::Type::Null {
-            let _ = d.null();
-            return Ok(GattDiscoverResult::Complete);
-        }
-
-        // attr != NULL: decode uuid, handle, user_data
-        let uuid_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
-        let handle = d.u16().map_err(|_| BleError::RpcError)?;
-
-        // Extract the 16-bit UUID value from the attr's uuid bytes.
-        // C struct bt_uuid_16 layout: [type(1), pad(1), val_lo, val_hi]
-        let attr_uuid_16 = if uuid_bytes.len() >= 4 && uuid_bytes[0] == cgm::BT_UUID_TYPE_16 {
-            u16::from_le_bytes([uuid_bytes[2], uuid_bytes[3]])
-        } else {
-            0
-        };
-
-        // Check if user_data is null.
-        // Peek with datatype() to avoid corrupting decoder position.
-        if d.datatype().map_err(|_| BleError::RpcError)? == minicbor::data::Type::Null {
-            let _ = d.null();
-            return Ok(GattDiscoverResult::Descriptor {
-                handle,
-                uuid_16: attr_uuid_16,
-            });
-        }
-
-        // user_data is not null — branch on attr_uuid_16
-        match attr_uuid_16 {
-            BT_UUID_GATT_PRIMARY_VAL | BT_UUID_GATT_SECONDARY_VAL => {
-                // Service: service_uuid(bstr), end_handle(uint)
-                let svc_uuid_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
-                let end_handle = d.u16().map_err(|_| BleError::RpcError)?;
-
-                let svc_uuid_16 =
-                    if svc_uuid_bytes.len() >= 4 && svc_uuid_bytes[0] == cgm::BT_UUID_TYPE_16 {
-                        u16::from_le_bytes([svc_uuid_bytes[2], svc_uuid_bytes[3]])
-                    } else {
-                        0
-                    };
-
-                Ok(GattDiscoverResult::Service {
-                    handle,
-                    service_uuid_16: svc_uuid_16,
-                    end_handle,
-                })
-            }
-            BT_UUID_GATT_CHRC_VAL => {
-                // Characteristic: char_uuid(bstr), value_handle(uint), properties(uint)
-                let char_uuid_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
-                let value_handle = d.u16().map_err(|_| BleError::RpcError)?;
-                let properties = d.u8().map_err(|_| BleError::RpcError)?;
-
-                let char_uuid_16 =
-                    if char_uuid_bytes.len() >= 4 && char_uuid_bytes[0] == cgm::BT_UUID_TYPE_16 {
-                        u16::from_le_bytes([char_uuid_bytes[2], char_uuid_bytes[3]])
-                    } else {
-                        0
-                    };
-
-                Ok(GattDiscoverResult::Characteristic {
-                    handle,
-                    char_uuid_16,
-                    value_handle,
-                    properties,
-                })
-            }
-            _ => {
-                // Include or unknown — treat as descriptor
-                Ok(GattDiscoverResult::Descriptor {
-                    handle,
-                    uuid_16: attr_uuid_16,
-                })
+    /// // Wait for any successful connection.
+    /// let conn = ble.wait_for(|e| match e {
+    ///     BleEvent::Connected(c) if c.err == 0 => Some(c),
+    ///     _ => None,
+    /// }).await?;
+    /// ```
+    pub async fn wait_for<F, R>(&mut self, mut f: F) -> Result<R, BleError>
+    where
+        F: FnMut(BleEvent) -> Option<R>,
+    {
+        loop {
+            if let Some(result) = f(self.next_event().await?) {
+                return Ok(result);
             }
         }
-    }
-
-    /// Decode a GATT notification from raw CBOR payload.
-    ///
-    /// Wire format (CONFIG_BT_MAX_CONN=1, so no conn encoded):
-    ///   scratchpad_size(uint), params_ptr(uint), data(bstr | null)
-    ///
-    /// When data is CBOR null, it means the subscription was terminated
-    /// (e.g., peripheral disconnected or unsubscribed). In that case,
-    /// `data_len` is set to 0.
-    fn decode_notification(payload: &[u8]) -> Result<GattNotificationData, BleError> {
-        let mut d = minicbor::decode::Decoder::new(payload);
-
-        let _scratchpad_size = d.u32().map_err(|_| BleError::RpcError)?;
-        let params_ptr = d.u64().map_err(|_| BleError::RpcError)?;
-
-        let mut data = [0u8; 128];
-        let data_len;
-
-        // data can be CBOR null (subscription ended) or a byte string.
-        if d.datatype().map_err(|_| BleError::RpcError)? == minicbor::data::Type::Null {
-            let _ = d.null();
-            data_len = 0;
-        } else {
-            let data_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
-            data_len = core::cmp::min(data_bytes.len(), data.len());
-            data[..data_len].copy_from_slice(&data_bytes[..data_len]);
-        }
-
-        Ok(GattNotificationData {
-            params_ptr,
-            data,
-            data_len,
-        })
-    }
-
-    /// Decode a scan result from raw CBOR payload.
-    ///
-    /// Wire format (encoded by the server):
-    ///   scratchpad_size(uint), bt_addr_le_t(bytes[7]: type+addr),
-    ///   sid(u8), rssi(i8), tx_power(i8), adv_type(u8), adv_props(u16),
-    ///   interval(u16), primary_phy(u8), secondary_phy(u8), ad_data(bytes)
-    fn decode_scan_result(payload: &[u8]) -> Result<ScanResultData, BleError> {
-        let mut d = minicbor::decode::Decoder::new(payload);
-
-        // First field is scratchpad_size — skip it.
-        let _scratchpad_size = d.u32().map_err(|_| BleError::RpcError)?;
-
-        // bt_addr_le_t is encoded as a 7-byte buffer: [type, addr[0..6]]
-        let addr_le_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
-        if addr_le_bytes.len() < 7 {
-            return Err(BleError::RpcError);
-        }
-        let addr_type = addr_le_bytes[0];
-        let mut addr = [0u8; 6];
-        addr.copy_from_slice(&addr_le_bytes[1..7]);
-
-        let sid = d.u8().map_err(|_| BleError::RpcError)?;
-        let rssi = d.i8().map_err(|_| BleError::RpcError)?;
-        let tx_power = d.i8().map_err(|_| BleError::RpcError)?;
-        let adv_type = d.u8().map_err(|_| BleError::RpcError)?;
-        let adv_props = d.u16().map_err(|_| BleError::RpcError)?;
-        let interval = d.u16().map_err(|_| BleError::RpcError)?;
-        let primary_phy = d.u8().map_err(|_| BleError::RpcError)?;
-        let secondary_phy = d.u8().map_err(|_| BleError::RpcError)?;
-        let ad_data_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
-
-        let mut ad_data = [0u8; 64];
-        let ad_len = core::cmp::min(ad_data_bytes.len(), 64);
-        ad_data[..ad_len].copy_from_slice(&ad_data_bytes[..ad_len]);
-
-        Ok(ScanResultData {
-            addr_type,
-            addr,
-            sid,
-            rssi,
-            tx_power,
-            adv_type,
-            adv_props,
-            interval,
-            primary_phy,
-            secondary_phy,
-            ad_data,
-            ad_data_len: ad_len,
-        })
     }
 
     // ========================================================================
@@ -1641,6 +1183,233 @@ impl<T: AsyncTransport> Ble<T> {
             .await
             .map_err(|_| BleError::RpcError)
     }
+}
+
+// ============================================================================
+// BleDecoder — RpcEventDecoder implementation for the BLE protocol layer
+// ============================================================================
+
+/// Private marker type that carries the BLE decode logic for [`RpcClient::next_event`].
+struct BleDecoder;
+
+impl RpcEventDecoder for BleDecoder {
+    type Event = BleEvent;
+    type Error = BleError;
+
+    fn ack_type(cmd_id: u8) -> AckType {
+        if cmd_id == BleHostCommandId::BtGattDiscoverCallbackRpcCmd as u8
+            || cmd_id == BleHostCommandId::BtGattSubscribeParamsNotifyRpcCmd as u8
+        {
+            AckType::U8(BT_GATT_ITER_CONTINUE)
+        } else if cmd_id == BleHostCommandId::BtConnCbLeParamReqCallRpcCmd as u8 {
+            AckType::Bool(true)
+        } else {
+            AckType::Void
+        }
+    }
+
+    fn decode(cmd_id: u8, payload: &[u8]) -> Result<Option<BleEvent>, BleError> {
+        let event = match cmd_id {
+            id if id == BleHostCommandId::BtLeScanCbRecvRpcCmd as u8 => {
+                BleEvent::ScanResult(decode_scan_result(payload)?)
+            }
+            id if id == BleHostCommandId::BtLeScanCbTimeoutRpcCmd as u8 => BleEvent::ScanTimeout,
+            id if id == BleHostCommandId::BtConnCbConnectedCallRpcCmd as u8 => {
+                let mut d = minicbor::decode::Decoder::new(payload);
+                let err = d.u8().map_err(|_| BleError::RpcError)?;
+                BleEvent::Connected(ConnectionEvent { err })
+            }
+            id if id == BleHostCommandId::BtConnCbDisconnectedCallRpcCmd as u8 => {
+                BleEvent::Disconnected
+            }
+            id if id == BleHostCommandId::BtConnCbLeParamReqCallRpcCmd as u8 => BleEvent::LeParamReq,
+            id if id == BleHostCommandId::BtConnCbSecurityChangedCallRpcCmd as u8 => {
+                let mut d = minicbor::decode::Decoder::new(payload);
+                let level = d.u8().unwrap_or(0);
+                let err = d.u8().unwrap_or(0xFF);
+                BleEvent::SecurityChanged { level, err }
+            }
+            id if id == BleHostCommandId::BtRpcAuthCbPairingConfirmRpcCmd as u8 => {
+                BleEvent::PairingConfirm
+            }
+            id if id == BleHostCommandId::BtRpcAuthCbPasskeyConfirmRpcCmd as u8 => {
+                let mut d = minicbor::decode::Decoder::new(payload);
+                let passkey = d.u32().unwrap_or(0);
+                BleEvent::PasskeyConfirm(passkey)
+            }
+            id if id == BleHostCommandId::BtGattDiscoverCallbackRpcCmd as u8 => {
+                BleEvent::GattDiscovery(decode_discover_callback(payload)?)
+            }
+            id if id == BleHostCommandId::BtGattSubscribeParamsNotifyRpcCmd as u8 => {
+                BleEvent::GattNotification(decode_notification(payload)?)
+            }
+            _ => BleEvent::Unknown(cmd_id),
+        };
+        Ok(Some(event))
+    }
+}
+
+// ============================================================================
+// Internal event payload decoders (module-level so BleDecoder can call them
+// without carrying the AsyncTransport type parameter)
+// ============================================================================
+
+/// Decode a GATT discovery callback from raw CBOR payload.
+///
+/// Wire format (CONFIG_BT_MAX_CONN=1, so no conn encoded):
+///   params_ptr(uint),
+///   then either:
+///     null            → discovery complete
+///     OR:
+///       uuid(bstr)    → attribute UUID
+///       handle(uint)  → attribute handle
+///       user_data:
+///         null                                → no user_data
+///         OR for primary/secondary service:
+///           service_uuid(bstr), end_handle(uint)
+///         OR for characteristic:
+///           char_uuid(bstr), value_handle(uint), properties(uint)
+fn decode_discover_callback(payload: &[u8]) -> Result<GattDiscoverResult, BleError> {
+    let mut d = minicbor::decode::Decoder::new(payload);
+
+    // params_ptr — we don't need it currently, but must consume it.
+    let _params_ptr = d.u64().map_err(|_| BleError::RpcError)?;
+
+    // Check for null (discovery complete).
+    // Use datatype() to peek without consuming, because d.null() advances
+    // the decoder position even on failure.
+    if d.datatype().map_err(|_| BleError::RpcError)? == minicbor::data::Type::Null {
+        let _ = d.null();
+        return Ok(GattDiscoverResult::Complete);
+    }
+
+    // attr != NULL: decode uuid, handle, user_data
+    let uuid_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+    let handle = d.u16().map_err(|_| BleError::RpcError)?;
+
+    // Extract the 16-bit UUID value from the attr's uuid bytes.
+    // C struct bt_uuid_16 layout: [type(1), pad(1), val_lo, val_hi]
+    let attr_uuid_16 = if uuid_bytes.len() >= 4 && uuid_bytes[0] == cgm::BT_UUID_TYPE_16 {
+        u16::from_le_bytes([uuid_bytes[2], uuid_bytes[3]])
+    } else {
+        0
+    };
+
+    // Check if user_data is null.
+    if d.datatype().map_err(|_| BleError::RpcError)? == minicbor::data::Type::Null {
+        let _ = d.null();
+        return Ok(GattDiscoverResult::Descriptor {
+            handle,
+            uuid_16: attr_uuid_16,
+        });
+    }
+
+    // user_data is not null — branch on attr_uuid_16
+    match attr_uuid_16 {
+        BT_UUID_GATT_PRIMARY_VAL | BT_UUID_GATT_SECONDARY_VAL => {
+            let svc_uuid_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+            let end_handle = d.u16().map_err(|_| BleError::RpcError)?;
+            let svc_uuid_16 =
+                if svc_uuid_bytes.len() >= 4 && svc_uuid_bytes[0] == cgm::BT_UUID_TYPE_16 {
+                    u16::from_le_bytes([svc_uuid_bytes[2], svc_uuid_bytes[3]])
+                } else {
+                    0
+                };
+            Ok(GattDiscoverResult::Service {
+                handle,
+                service_uuid_16: svc_uuid_16,
+                end_handle,
+            })
+        }
+        BT_UUID_GATT_CHRC_VAL => {
+            let char_uuid_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+            let value_handle = d.u16().map_err(|_| BleError::RpcError)?;
+            let properties = d.u8().map_err(|_| BleError::RpcError)?;
+            let char_uuid_16 =
+                if char_uuid_bytes.len() >= 4 && char_uuid_bytes[0] == cgm::BT_UUID_TYPE_16 {
+                    u16::from_le_bytes([char_uuid_bytes[2], char_uuid_bytes[3]])
+                } else {
+                    0
+                };
+            Ok(GattDiscoverResult::Characteristic {
+                handle,
+                char_uuid_16,
+                value_handle,
+                properties,
+            })
+        }
+        _ => Ok(GattDiscoverResult::Descriptor {
+            handle,
+            uuid_16: attr_uuid_16,
+        }),
+    }
+}
+
+/// Decode a GATT notification from raw CBOR payload.
+///
+/// Wire format: scratchpad_size(uint), params_ptr(uint), data(bstr | null)
+fn decode_notification(payload: &[u8]) -> Result<GattNotificationData, BleError> {
+    let mut d = minicbor::decode::Decoder::new(payload);
+    let _scratchpad_size = d.u32().map_err(|_| BleError::RpcError)?;
+    let params_ptr = d.u64().map_err(|_| BleError::RpcError)?;
+    let mut data = [0u8; 128];
+    let data_len;
+    if d.datatype().map_err(|_| BleError::RpcError)? == minicbor::data::Type::Null {
+        let _ = d.null();
+        data_len = 0;
+    } else {
+        let data_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+        data_len = core::cmp::min(data_bytes.len(), data.len());
+        data[..data_len].copy_from_slice(&data_bytes[..data_len]);
+    }
+    Ok(GattNotificationData {
+        params_ptr,
+        data,
+        data_len,
+    })
+}
+
+/// Decode a scan result from raw CBOR payload.
+///
+/// Wire format: scratchpad_size(uint), bt_addr_le_t(bytes[7]), sid(u8),
+/// rssi(i8), tx_power(i8), adv_type(u8), adv_props(u16), interval(u16),
+/// primary_phy(u8), secondary_phy(u8), ad_data(bytes)
+fn decode_scan_result(payload: &[u8]) -> Result<ScanResultData, BleError> {
+    let mut d = minicbor::decode::Decoder::new(payload);
+    let _scratchpad_size = d.u32().map_err(|_| BleError::RpcError)?;
+    let addr_le_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+    if addr_le_bytes.len() < 7 {
+        return Err(BleError::RpcError);
+    }
+    let addr_type = addr_le_bytes[0];
+    let mut addr = [0u8; 6];
+    addr.copy_from_slice(&addr_le_bytes[1..7]);
+    let sid = d.u8().map_err(|_| BleError::RpcError)?;
+    let rssi = d.i8().map_err(|_| BleError::RpcError)?;
+    let tx_power = d.i8().map_err(|_| BleError::RpcError)?;
+    let adv_type = d.u8().map_err(|_| BleError::RpcError)?;
+    let adv_props = d.u16().map_err(|_| BleError::RpcError)?;
+    let interval = d.u16().map_err(|_| BleError::RpcError)?;
+    let primary_phy = d.u8().map_err(|_| BleError::RpcError)?;
+    let secondary_phy = d.u8().map_err(|_| BleError::RpcError)?;
+    let ad_data_bytes = d.bytes().map_err(|_| BleError::RpcError)?;
+    let mut ad_data = [0u8; 64];
+    let ad_len = core::cmp::min(ad_data_bytes.len(), 64);
+    ad_data[..ad_len].copy_from_slice(&ad_data_bytes[..ad_len]);
+    Ok(ScanResultData {
+        addr_type,
+        addr,
+        sid,
+        rssi,
+        tx_power,
+        adv_type,
+        adv_props,
+        interval,
+        primary_phy,
+        secondary_phy,
+        ad_data,
+        ad_data_len: ad_len,
+    })
 }
 
 /// LE scan parameters matching Zephyr's `struct bt_le_scan_param`.
@@ -1908,6 +1677,44 @@ pub struct GattNotificationData {
     pub data: [u8; 128],
     /// Number of valid bytes in `data`.
     pub data_len: usize,
+}
+
+/// A server-initiated event decoded from the nRF RPC stream.
+///
+/// Returned by [`Ble::next_event()`]. The caller loops over events and
+/// matches the variants it cares about.
+#[derive(Debug)]
+pub enum BleEvent {
+    /// A scan result arrived (`BtLeScanCbRecvRpcCmd`).
+    ScanResult(ScanResultData),
+    /// The scan window timed out (`BtLeScanCbTimeoutRpcCmd`).
+    ScanTimeout,
+    /// A connection was established (`BtConnCbConnectedCallRpcCmd`).
+    Connected(ConnectionEvent),
+    /// The connection was dropped (`BtConnCbDisconnectedCallRpcCmd`).
+    Disconnected,
+    /// The peer requested updated LE connection parameters (`BtConnCbLeParamReqCallRpcCmd`).
+    /// This variant is automatically accepted (bool `true` ACK sent by `next_event`).
+    LeParamReq,
+    /// Security / pairing status changed (`BtConnCbSecurityChangedCallRpcCmd`).
+    SecurityChanged {
+        /// New security level (1–4).
+        level: u8,
+        /// HCI error code. 0 = success.
+        err: u8,
+    },
+    /// The peer requests confirmation of pairing (`BtRpcAuthCbPairingConfirmRpcCmd`).
+    /// Call [`Ble::bt_conn_auth_pairing_confirm()`] to accept.
+    PairingConfirm,
+    /// The peer requests numeric comparison confirmation (`BtRpcAuthCbPasskeyConfirmRpcCmd`).
+    /// The inner value is the passkey. Call [`Ble::bt_conn_auth_passkey_confirm()`] to accept.
+    PasskeyConfirm(u32),
+    /// A GATT discovery callback arrived (`BtGattDiscoverCallbackRpcCmd`).
+    GattDiscovery(GattDiscoverResult),
+    /// A GATT notification arrived (`BtGattSubscribeParamsNotifyRpcCmd`).
+    GattNotification(GattNotificationData),
+    /// An unrecognised command ID arrived. The u8 is the raw `cmd_id`.
+    Unknown(u8),
 }
 
 // ============================================================================

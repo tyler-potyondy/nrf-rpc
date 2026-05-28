@@ -54,6 +54,67 @@ impl From<CborError> for RpcError {
     }
 }
 
+// ============================================================================
+// Generic event dispatch traits
+// ============================================================================
+
+/// The ACK type to send in response to a server-initiated command.
+///
+/// The correct value is protocol-specific and must be returned by
+/// [`RpcEventDecoder::ack_type`] for each `cmd_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckType {
+    /// No-payload void response (most events).
+    Void,
+    /// Single-byte `u8` response (e.g., `BT_GATT_ITER_CONTINUE = 1` for GATT discovery).
+    U8(u8),
+    /// Boolean response (e.g., `true` to accept LE parameter update requests).
+    Bool(bool),
+}
+
+/// Decode server-initiated events for an nRF RPC protocol layer.
+///
+/// Implement this trait for your protocol's event type, then call
+/// [`RpcClient::next_event`] to receive, ACK, and decode events without
+/// duplicating transport/queue handling.
+///
+/// # Example
+///
+/// ```ignore
+/// struct MyDecoder;
+/// impl RpcEventDecoder for MyDecoder {
+///     type Event = MyEvent;
+///     type Error = MyError; // must impl From<RpcError>
+///
+///     fn ack_type(cmd_id: u8) -> AckType { AckType::Void }
+///
+///     fn decode(cmd_id: u8, payload: &[u8]) -> Result<Option<MyEvent>, MyError> {
+///         match cmd_id {
+///             1 => Ok(Some(MyEvent::Foo)),
+///             _ => Ok(None), // silently skip unknown commands
+///         }
+///     }
+/// }
+///
+/// let event = client.next_event::<MyDecoder>().await?;
+/// ```
+pub trait RpcEventDecoder {
+    /// The decoded event type returned to the caller.
+    type Event;
+    /// Error type; must convert from [`RpcError`] so transport errors propagate.
+    type Error: From<RpcError>;
+
+    /// Return the ACK type the protocol requires for `cmd_id`.
+    fn ack_type(cmd_id: u8) -> AckType;
+
+    /// Decode the raw CBOR `payload` for `cmd_id`.
+    ///
+    /// - `Ok(Some(e))` — yield the event to the caller.
+    /// - `Ok(None)` — silently consume this event and wait for the next one.
+    /// - `Err(e)` — propagate a decode error.
+    fn decode(cmd_id: u8, payload: &[u8]) -> Result<Option<Self::Event>, Self::Error>;
+}
+
 /// A server-initiated event that was received while processing a command response.
 /// Stored internally so it can be retrieved later by `receive_server_event`.
 struct PendingEvent {
@@ -196,11 +257,7 @@ impl<T: AsyncTransport> RpcClient<T> {
     ///
     /// This mimics the C RPC client's behavior where the `passkey_confirm`
     /// callback calls `bt_conn_auth_passkey_confirm()` inline.
-    pub(crate) fn set_auto_confirm(
-        &mut self,
-        event_cmd_id: u8,
-        action_cmd_id: u8,
-    ) {
+    pub(crate) fn set_auto_confirm(&mut self, event_cmd_id: u8, action_cmd_id: u8) {
         self.auto_confirm_event_cmd_id = Some(event_cmd_id);
         self.auto_confirm_action_cmd_id = Some(action_cmd_id);
     }
@@ -223,9 +280,11 @@ impl<T: AsyncTransport> RpcClient<T> {
     ) -> Result<(), RpcError> {
         // Choose ACK type
         if self.bool_ack_cmd_id == Some(cmd_id) {
-            self.send_bool_response(src_ctx, dst_grp, src_grp, true).await?;
+            self.send_bool_response(src_ctx, dst_grp, src_grp, true)
+                .await?;
         } else if let Some(val) = override_u8 {
-            self.send_u8_response(src_ctx, dst_grp, src_grp, val).await?;
+            self.send_u8_response(src_ctx, dst_grp, src_grp, val)
+                .await?;
         } else {
             self.send_void_response(src_ctx, dst_grp, src_grp).await?;
         }
@@ -246,12 +305,9 @@ impl<T: AsyncTransport> RpcClient<T> {
                     crate::packet::SrcContextId::try_from(self.context_id)
                         .expect("Invalid source context ID"),
                     DestContextId::try_from(0xFF).expect("Invalid dest context ID"),
-                    crate::packet::CommandId::try_from(action_id)
-                        .expect("Invalid command ID"),
-                    SrcGroupId::try_from(self.bt_rpc_group_id)
-                        .expect("Invalid source group ID"),
-                    DstGroupId::try_from(self.bt_rpc_group_id)
-                        .expect("Invalid dest group ID"),
+                    crate::packet::CommandId::try_from(action_id).expect("Invalid command ID"),
+                    SrcGroupId::try_from(self.bt_rpc_group_id).expect("Invalid source group ID"),
+                    DstGroupId::try_from(self.bt_rpc_group_id).expect("Invalid dest group ID"),
                     payload,
                 );
 
@@ -292,11 +348,7 @@ impl<T: AsyncTransport> RpcClient<T> {
                                         .await;
                                 } else {
                                     let _ = self
-                                        .send_void_response(
-                                            evt_src_ctx,
-                                            evt_dst_grp,
-                                            evt_src_grp,
-                                        )
+                                        .send_void_response(evt_src_ctx, evt_dst_grp, evt_src_grp)
                                         .await;
                                 }
                             }
@@ -507,7 +559,9 @@ impl<T: AsyncTransport> RpcClient<T> {
                             let payload_bytes: &[u8] = payload.into();
                             self.enqueue_event(cmd_id, payload_bytes);
                         }
-                        let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
+                        let _ = self
+                            .ack_event(cmd_id, src_ctx, dst_grp, src_grp, None)
+                            .await;
                     }
                     TypeField::Response => {
                         if let ParsedPayload::Cbor(_) = recv_packet.payload {
@@ -553,7 +607,9 @@ impl<T: AsyncTransport> RpcClient<T> {
                             let payload_bytes: &[u8] = payload.into();
                             self.enqueue_event(cmd_id, payload_bytes);
                         }
-                        let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
+                        let _ = self
+                            .ack_event(cmd_id, src_ctx, dst_grp, src_grp, None)
+                            .await;
                     }
                     TypeField::Response => {
                         if i32_result.is_none() {
@@ -732,9 +788,7 @@ impl<T: AsyncTransport> RpcClient<T> {
                                 .send_u8_response(src_ctx, dst_grp, src_grp, u8_val)
                                 .await;
                         } else {
-                            let _ = self
-                                .send_void_response(src_ctx, dst_grp, src_grp)
-                                .await;
+                            let _ = self.send_void_response(src_ctx, dst_grp, src_grp).await;
                         }
                     }
                     TypeField::Response => {
@@ -854,7 +908,9 @@ impl<T: AsyncTransport> RpcClient<T> {
                     }
 
                     // ACK the event appropriately (bool for le_param_req, void otherwise)
-                    let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
+                    let _ = self
+                        .ack_event(cmd_id, src_ctx, dst_grp, src_grp, None)
+                        .await;
                 }
             }
         }
@@ -910,7 +966,9 @@ impl<T: AsyncTransport> RpcClient<T> {
                     } else {
                         // Additional Command — enqueue for later, ACK appropriately
                         self.enqueue_event(cmd_id, payload_bytes);
-                        let _ = self.ack_event(cmd_id, src_ctx, dst_grp, src_grp, None).await;
+                        let _ = self
+                            .ack_event(cmd_id, src_ctx, dst_grp, src_grp, None)
+                            .await;
                     }
                 }
             }
@@ -937,6 +995,113 @@ impl<T: AsyncTransport> RpcClient<T> {
     //     // let payload = &response_buf[5..len];
     //     // self.decode_i32_response(payload)
     // }
+
+    /// Receive and decode the next server-initiated event using an [`RpcEventDecoder`].
+    ///
+    /// Handles the full event receive cycle:
+    /// 1. Reads the next raw event (queue first, then transport).
+    /// 2. Sends the ACK type returned by `D::ack_type(cmd_id)`.
+    /// 3. Decodes the payload via `D::decode(cmd_id, payload)`.
+    ///    - `Ok(None)` means "skip this event" — loops automatically.
+    ///    - `Ok(Some(e))` returns the event.
+    ///    - `Err(e)` propagates the error.
+    ///
+    /// Protocol layers built on top of [`RpcClient`] should implement
+    /// [`RpcEventDecoder`] and call this rather than [`Self::next_raw_event`]
+    /// directly.
+    pub async fn next_event<D: RpcEventDecoder>(&mut self) -> Result<D::Event, D::Error> {
+        loop {
+            let mut buf = [0u8; 256];
+            let (cmd_id, payload_len, ack_routing) =
+                self.next_raw_event(&mut buf).await.map_err(Into::into)?;
+            let payload = &buf[..payload_len];
+
+            if let Some((src_ctx, dst_grp, src_grp)) = ack_routing {
+                match D::ack_type(cmd_id) {
+                    AckType::Void => {
+                        self.send_void_response(src_ctx, dst_grp, src_grp)
+                            .await
+                            .map_err(Into::into)?;
+                    }
+                    AckType::U8(v) => {
+                        self.send_u8_response(src_ctx, dst_grp, src_grp, v)
+                            .await
+                            .map_err(Into::into)?;
+                    }
+                    AckType::Bool(b) => {
+                        self.send_bool_response(src_ctx, dst_grp, src_grp, b)
+                            .await
+                            .map_err(Into::into)?;
+                    }
+                }
+            }
+
+            match D::decode(cmd_id, payload) {
+                Ok(Some(event)) => return Ok(event),
+                Ok(None) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Receive the next raw server-initiated event (Command packet).
+    ///
+    /// Checks the pending-event queue first (already ACKed). For live events
+    /// from the transport, the payload is written into `buf` and routing info
+    /// `(src_ctx, dst_grp, src_grp)` is returned so the caller can send the
+    /// correct ACK type. Queue events return `None` for routing info.
+    ///
+    /// Additional Command packets that arrive in the same transport frame are
+    /// ACKed with void and enqueued for subsequent calls.
+    pub(crate) async fn next_raw_event(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<(u8, usize, Option<(u8, u8, u8)>), RpcError> {
+        // Drain queue first — those events were already ACKed on arrival.
+        if let Some((cmd_id, payload_buf, payload_len)) = self.dequeue_event() {
+            let len = core::cmp::min(payload_len, buf.len());
+            buf[..len].copy_from_slice(&payload_buf[..len]);
+            return Ok((cmd_id, len, None));
+        }
+
+        // Nothing queued — do a live transport read.
+        let mut raw_buf = [0u8; 256];
+        let recv_packet_list = self.receive_packet(&mut raw_buf).await?;
+
+        let mut found: Option<(u8, usize, u8, u8, u8)> = None;
+
+        for recv_packet in recv_packet_list.into_iter().flatten() {
+            if recv_packet.packet_type == TypeField::Command {
+                let cmd_id: u8 = recv_packet.command_id.into();
+                let src_ctx: u8 = recv_packet.src_context_id.into();
+                let src_grp: u8 = recv_packet.src_group_id.into();
+                let dst_grp: u8 = recv_packet.dst_group_id.into();
+
+                if let ParsedPayload::Cbor(payload) = recv_packet.payload {
+                    let payload_bytes: &[u8] = payload.into();
+
+                    if found.is_none() {
+                        // First event — return it to the caller for ACKing.
+                        let len = core::cmp::min(payload_bytes.len(), buf.len());
+                        buf[..len].copy_from_slice(&payload_bytes[..len]);
+                        found = Some((cmd_id, len, src_ctx, dst_grp, src_grp));
+                    } else {
+                        // Additional event in the same frame — enqueue and ACK with void now.
+                        self.enqueue_event(cmd_id, payload_bytes);
+                        let _ = self
+                            .ack_event(cmd_id, src_ctx, dst_grp, src_grp, None)
+                            .await;
+                    }
+                }
+            }
+        }
+
+        if let Some((cmd_id, len, src_ctx, dst_grp, src_grp)) = found {
+            Ok((cmd_id, len, Some((src_ctx, dst_grp, src_grp))))
+        } else {
+            Err(RpcError::NoResponse)
+        }
+    }
 
     fn decode_i32_response(&self, payload: &[u8]) -> Result<i32, RpcError> {
         use minicbor::decode::Decoder;
@@ -1014,7 +1179,11 @@ mod tests {
     }
 
     fn make_command_event_frame_internal(
-        src_ctx: u8, cmd_id: u8, dst_ctx: u8, src_grp: u8, dst_grp: u8,
+        src_ctx: u8,
+        cmd_id: u8,
+        dst_ctx: u8,
+        src_grp: u8,
+        dst_grp: u8,
     ) -> Vec<u8> {
         let raw = [0x80 | src_ctx, cmd_id, dst_ctx, src_grp, dst_grp, 0xF6u8];
         make_hdlc_frame_internal(&raw)
@@ -1112,8 +1281,7 @@ mod tests {
             payload,
         );
 
-        let result =
-            block_on(client.send_command_and_get_i32_ack_events_bool(packet, true));
+        let result = block_on(client.send_command_and_get_i32_ack_events_bool(packet, true));
 
         assert!(
             result.is_ok(),
