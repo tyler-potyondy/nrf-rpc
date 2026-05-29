@@ -105,10 +105,33 @@ pub trait Uart {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
 
     /// Write raw bytes to the UART.
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error>;
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error>;
 
     /// Delay for the given number of milliseconds.
     async fn delay_ms(&mut self, ms: u32);
+
+    /// Returns `true` if at least one byte is already sitting in the
+    /// hardware/DMA ring buffer and can be returned by [`read`](Self::read)
+    /// without suspending.
+    ///
+    /// Implementations **must** be backed by a persistent ring buffer (e.g. a
+    /// DMA-filled circular buffer or an interrupt-driven FIFO). The check must
+    /// be synchronous and must not consume any bytes.
+    ///
+    /// For Embassy targets, delegate to [`embedded_io::ReadReady`] which checks
+    /// the DMA ring buffer's read/write pointers without consuming bytes:
+    ///
+    /// ```ignore
+    /// fn has_buffered_data(&mut self) -> bool {
+    ///     use embedded_io::ReadReady;
+    ///     self.uart.read_ready().unwrap_or(false)
+    /// }
+    /// ```
+    ///
+    /// If `ReadReady` is not available for your peripheral, return `false` as a
+    /// safe conservative fallback — the two-task pattern remains correct, it
+    /// just polls via `yield_now()` on every loop iteration.
+    fn has_buffered_data(&mut self) -> bool;
 }
 
 /// UART transport wrapper that implements [`AsyncTransport`] on top of a [`Uart`].
@@ -139,8 +162,14 @@ impl<Inner: Uart> AsyncTransport for UartTransport<Inner> {
     type TxTransportPacket<'a> = UartTxTransport<'a>;
     type RxTransportPacket<'a> = UartRxTransport<'a>;
 
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         self.inner.write(data).await
+    }
+
+    /// Returns `true` if a complete HDLC frame is already accumulated in the
+    /// internal buffer, or if the underlying [`Uart`] has bytes ready.
+    fn has_buffered_data(&mut self) -> bool {
+        hdlc_frame_complete(&self.rx_buf[..self.rx_len]) || self.inner.has_buffered_data()
     }
 
     /// Accumulate raw bytes from the inner transport until a complete HDLC frame

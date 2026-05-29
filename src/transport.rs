@@ -48,7 +48,7 @@ pub trait AsyncTransport {
     /// Write bytes to the transport
     ///
     /// Should block until all bytes are written or an error occurs.
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error>;
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error>;
 
     /// Read bytes from the transport into the provided buffer
     ///
@@ -58,6 +58,31 @@ pub trait AsyncTransport {
 
     /// Delay for the specified number of milliseconds
     async fn delay_ms(&mut self, ms: u32);
+
+    /// Returns `true` if bytes are already buffered and [`read`](Self::read)
+    /// can make progress without suspending.
+    ///
+    /// **Implementations must be backed by a persistent ring buffer** (e.g. a
+    /// DMA-filled circular buffer or interrupt-driven FIFO). The check is
+    /// synchronous and must not consume any bytes.
+    ///
+    /// This is used by [`RpcClient::has_data`] to let callers in a two-task
+    /// embassy setup skip taking a mutex when there is nothing to process:
+    ///
+    /// ```ignore
+    /// loop {
+    ///     let mut ble = ble_mutex.lock().await;
+    ///     if ble.has_data() {
+    ///         let evt = ble.next_event().await?; // completes quickly
+    ///         drop(ble);
+    ///         handle(evt);
+    ///     } else {
+    ///         drop(ble); // release immediately — nothing to do
+    ///         embassy_futures::yield_now().await;
+    ///     }
+    /// }
+    /// ```
+    fn has_buffered_data(&mut self) -> bool;
 }
 
 #[derive(Debug)]

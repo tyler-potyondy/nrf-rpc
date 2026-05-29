@@ -94,13 +94,14 @@ struct AlwaysErrTransport;
 
 impl Uart for AlwaysErrTransport {
     type Error = MockError;
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         Ok(data.len())
     }
     async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Self::Error> {
         Err(MockError)
     }
     async fn delay_ms(&mut self, _ms: u32) {}
+    fn has_buffered_data(&mut self) -> bool { false }
 }
 
 /// `read()` returns `Err` for the first `fail_count` calls, then returns a
@@ -124,7 +125,7 @@ impl FailThenSucceedTransport {
 
 impl Uart for FailThenSucceedTransport {
     type Error = MockError;
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         Ok(data.len())
     }
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
@@ -138,6 +139,7 @@ impl Uart for FailThenSucceedTransport {
         Ok(n)
     }
     async fn delay_ms(&mut self, _ms: u32) {}
+    fn has_buffered_data(&mut self) -> bool { false }
 }
 
 /// `read()` always returns `Ok(0)` — no data available.
@@ -150,13 +152,14 @@ struct NoDataTransport;
 
 impl Uart for NoDataTransport {
     type Error = MockError;
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         Ok(data.len())
     }
     async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Self::Error> {
         Ok(0)
     }
     async fn delay_ms(&mut self, _ms: u32) {}
+    fn has_buffered_data(&mut self) -> bool { false }
 }
 
 /// `read()` returns `Ok(0)` for the first `empty_count` calls, then returns a
@@ -180,7 +183,7 @@ impl EmptyThenSucceedTransport {
 
 impl Uart for EmptyThenSucceedTransport {
     type Error = MockError;
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         Ok(data.len())
     }
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
@@ -194,6 +197,7 @@ impl Uart for EmptyThenSucceedTransport {
         Ok(n)
     }
     async fn delay_ms(&mut self, _ms: u32) {}
+    fn has_buffered_data(&mut self) -> bool { false }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

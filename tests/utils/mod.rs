@@ -53,10 +53,14 @@ impl Uart for MockUart {
         Ok(0)
     }
 
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         self.transmitted.borrow_mut().extend_from_slice(data);
         Ok(data.len())
     }
 
     async fn delay_ms(&mut self, _ms: u32) {}
+
+    fn has_buffered_data(&mut self) -> bool {
+        false
+    }
 }
