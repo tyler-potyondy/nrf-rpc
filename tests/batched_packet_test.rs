@@ -144,7 +144,7 @@ impl DelayedOneShotTransport {
 impl Uart for DelayedOneShotTransport {
     type Error = MockError;
 
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         self.writes.lock().unwrap().extend_from_slice(data);
         Ok(data.len())
     }
@@ -164,6 +164,8 @@ impl Uart for DelayedOneShotTransport {
     }
 
     async fn delay_ms(&mut self, _ms: u32) {}
+
+    fn has_buffered_data(&mut self) -> bool { false }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

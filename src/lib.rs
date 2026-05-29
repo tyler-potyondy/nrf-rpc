@@ -996,6 +996,92 @@ impl<T: AsyncTransport> RpcClient<T> {
     //     // self.decode_i32_response(payload)
     // }
 
+    /// Returns `true` if there is anything to process — either an event already
+    /// in the internal queue, or bytes buffered in the transport that haven't
+    /// been read yet.
+    ///
+    /// When `true`, [`next_event`](Self::next_event) is guaranteed to make
+    /// progress quickly without waiting for new wire activity. Use this in a
+    /// two-task embassy setup to avoid holding a mutex while blocking:
+    ///
+    /// ```ignore
+    /// loop {
+    ///     let mut ble = ble_mutex.lock().await;
+    ///     if ble.has_data() {
+    ///         let evt = ble.next_event().await?;
+    ///         drop(ble);
+    ///         handle(evt);
+    ///     } else {
+    ///         drop(ble); // nothing ready — release so command task can run
+    ///         embassy_futures::yield_now().await;
+    ///     }
+    /// }
+    /// ```
+    pub fn has_data(&mut self) -> bool {
+        self.pending_count > 0 || self.transport.has_buffered_data()
+    }
+
+    /// Returns `true` if at least one server-initiated event is already buffered
+    /// in the internal queue.
+    ///
+    /// When `true`, [`try_next_event`](Self::try_next_event) will return
+    /// `Ok(Some(_))` without reading the transport. When `false`,
+    /// [`next_event`](Self::next_event) will suspend until transport data arrives.
+    ///
+    /// This is useful in embassy tasks that must also service a channel, letting
+    /// you drain buffered events before blocking:
+    ///
+    /// ```ignore
+    /// loop {
+    ///     // Drain any already-buffered events first.
+    ///     while client.has_pending_event() {
+    ///         if let Some(evt) = client.try_next_event::<MyDecoder>()? {
+    ///             handle(evt);
+    ///         }
+    ///     }
+    ///     // Now select without worrying about next_event blocking forever.
+    ///     match select(channel.receive(), client.next_event::<MyDecoder>()).await {
+    ///         Either::First(cmd) => handle_cmd(cmd),
+    ///         Either::Second(Ok(evt)) => handle(evt),
+    ///         Either::Second(Err(e)) => { /* … */ }
+    ///     }
+    /// }
+    /// ```
+    pub fn has_pending_event(&self) -> bool {
+        self.pending_count > 0
+    }
+
+    /// Return the next already-queued event without reading the transport.
+    ///
+    /// Dequeues one entry from the internal ring buffer, decodes it via
+    /// `D::decode`, and returns the result. Returns `Ok(None)` immediately
+    /// when the queue is empty — it **never suspends**.
+    ///
+    /// Queued events were already ACKed when they arrived, so no ACK is sent.
+    /// Unknown `cmd_id`s for which `D::decode` returns `Ok(None)` are skipped
+    /// and the next queued entry is tried; the function only returns `Ok(None)`
+    /// once the queue is fully drained.
+    ///
+    /// ```ignore
+    /// while let Some(evt) = client.try_next_event::<MyDecoder>()? {
+    ///     handle(evt);
+    /// }
+    /// ```
+    pub fn try_next_event<D: RpcEventDecoder>(&mut self) -> Result<Option<D::Event>, D::Error> {
+        loop {
+            let (cmd_id, payload_buf, payload_len) = match self.dequeue_event() {
+                Some(e) => e,
+                None => return Ok(None),
+            };
+            let payload = &payload_buf[..payload_len];
+            match D::decode(cmd_id, payload) {
+                Ok(Some(event)) => return Ok(Some(event)),
+                Ok(None) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Receive and decode the next server-initiated event using an [`RpcEventDecoder`].
     ///
     /// Handles the full event receive cycle:
@@ -1223,7 +1309,7 @@ mod tests {
     impl crate::uart_transport::Uart for InternalOneShotUart {
         type Error = InternalMockError;
 
-        async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+        async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
             self.writes.lock().unwrap().extend_from_slice(data);
             Ok(data.len())
         }
@@ -1243,6 +1329,8 @@ mod tests {
         }
 
         async fn delay_ms(&mut self, _ms: u32) {}
+
+        fn has_buffered_data(&mut self) -> bool { false }
     }
 
     // ── `send_command_and_get_i32_ack_events_bool` ───────────────────────────

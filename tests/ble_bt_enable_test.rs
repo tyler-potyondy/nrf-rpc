@@ -45,7 +45,7 @@ impl DummyUart {
 impl Uart for DummyUart {
     type Error = DummyError;
 
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         let mut state = self.state.lock().unwrap();
         state.sent_packets.push(data.to_vec());
         Ok(data.len())
@@ -66,6 +66,8 @@ impl Uart for DummyUart {
     }
 
     async fn delay_ms(&mut self, _ms: u32) {}
+
+    fn has_buffered_data(&mut self) -> bool { false }
 }
 
 /// Minimal async executor for this test - same pattern as in integration_test.rs.

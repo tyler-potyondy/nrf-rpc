@@ -191,7 +191,7 @@ impl Uart for MockUart {
         }
     }
 
-    async fn write(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
         println!(
             "MockUart: Sending {} bytes to {}: {:02X?}",
             data.len(),
@@ -225,6 +225,10 @@ impl Uart for MockUart {
 
     async fn delay_ms(&mut self, ms: u32) {
         std::thread::sleep(Duration::from_millis(ms as u64));
+    }
+
+    fn has_buffered_data(&mut self) -> bool {
+        !self.rx_buffer.lock().unwrap().is_empty()
     }
 }
 

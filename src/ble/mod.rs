@@ -1114,6 +1114,72 @@ impl<T: AsyncTransport> Ble<T> {
     // Event dispatch
     // ========================================================================
 
+    /// Returns `true` if there is anything ready to process — either a queued
+    /// BLE event or bytes already sitting in the transport's ring buffer.
+    ///
+    /// This is the preferred check for the two-task embassy pattern:
+    ///
+    /// ```ignore
+    /// // Event task — only holds the mutex when data is actually ready.
+    /// loop {
+    ///     let mut ble = ble_mutex.lock().await;
+    ///     if ble.has_data() {
+    ///         let evt = ble.next_event().await?; // will not block indefinitely
+    ///         drop(ble);
+    ///         handle_ble_event(evt);
+    ///     } else {
+    ///         drop(ble); // release immediately so command task can run
+    ///         embassy_futures::yield_now().await;
+    ///     }
+    /// }
+    /// ```
+    pub fn has_data(&mut self) -> bool {
+        self.client.has_data()
+    }
+
+    /// Returns `true` if at least one BLE event is already buffered in the
+    /// internal queue — i.e., [`try_next_event`](Self::try_next_event) will
+    /// return `Ok(Some(_))` without touching the transport.
+    ///
+    /// Use this in embassy tasks that also receive commands from a channel to
+    /// avoid [`next_event`](Self::next_event) suspending indefinitely:
+    ///
+    /// ```ignore
+    /// loop {
+    ///     // Drain any buffered BLE events without blocking.
+    ///     while ble.has_pending_event() {
+    ///         if let Some(evt) = ble.try_next_event()? {
+    ///             handle_ble_event(evt);
+    ///         }
+    ///     }
+    ///     // Now it is safe to select — next_event will only block until
+    ///     // the next real transport packet arrives.
+    ///     match select(channel.receive(), ble.next_event()).await {
+    ///         Either::First(cmd) => handle_cmd(cmd).await,
+    ///         Either::Second(Ok(evt)) => handle_ble_event(evt),
+    ///         Either::Second(Err(e)) => defmt::error!("BLE event error"),
+    ///     }
+    /// }
+    /// ```
+    pub fn has_pending_event(&self) -> bool {
+        self.client.has_pending_event()
+    }
+
+    /// Return the next already-queued BLE event without reading the transport.
+    ///
+    /// Dequeues one entry from the internal ring buffer and decodes it.
+    /// Returns `Ok(None)` immediately when the queue is empty — it
+    /// **never suspends**. Queued events were already ACKed when they arrived.
+    ///
+    /// ```ignore
+    /// while let Some(event) = ble.try_next_event()? {
+    ///     handle_ble_event(event);
+    /// }
+    /// ```
+    pub fn try_next_event(&mut self) -> Result<Option<BleEvent>, BleError> {
+        self.client.try_next_event::<BleDecoder>()
+    }
+
     /// Receive and decode the next server-initiated BLE event.
     ///
     /// Reads one event from the transport (or the internal queue), sends the
@@ -1222,7 +1288,9 @@ impl RpcEventDecoder for BleDecoder {
             id if id == BleHostCommandId::BtConnCbDisconnectedCallRpcCmd as u8 => {
                 BleEvent::Disconnected
             }
-            id if id == BleHostCommandId::BtConnCbLeParamReqCallRpcCmd as u8 => BleEvent::LeParamReq,
+            id if id == BleHostCommandId::BtConnCbLeParamReqCallRpcCmd as u8 => {
+                BleEvent::LeParamReq
+            }
             id if id == BleHostCommandId::BtConnCbSecurityChangedCallRpcCmd as u8 => {
                 let mut d = minicbor::decode::Decoder::new(payload);
                 let level = d.u8().unwrap_or(0);
@@ -1683,7 +1751,7 @@ pub struct GattNotificationData {
 ///
 /// Returned by [`Ble::next_event()`]. The caller loops over events and
 /// matches the variants it cares about.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BleEvent {
     /// A scan result arrived (`BtLeScanCbRecvRpcCmd`).
     ScanResult(ScanResultData),
