@@ -69,6 +69,7 @@ impl<'a> BtData<'a> {
 }
 
 /// Bluetooth LE address (little-endian) used in advertising parameters.
+#[derive(Debug, Clone, Copy)]
 pub struct BtAddrLe {
     pub addr_type: u8,
     pub addr: [u8; 6],
